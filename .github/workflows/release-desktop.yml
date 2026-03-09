@@ -38,8 +38,10 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust_target }}
+
+      - name: Add Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -71,9 +73,9 @@ jobs:
       - name: Build desktop bundles
         run: |
           if [ -n "${{ matrix.rust_target }}" ]; then
-            cargo tauri build --manifest-path src-tauri/Cargo.toml --bundles ${{ matrix.bundles }} --target ${{ matrix.rust_target }}
+            cargo tauri build --bundles ${{ matrix.bundles }} --target ${{ matrix.rust_target }}
           else
-            cargo tauri build --manifest-path src-tauri/Cargo.toml --bundles ${{ matrix.bundles }}
+            cargo tauri build --bundles ${{ matrix.bundles }}
           fi
         shell: bash
         env:
