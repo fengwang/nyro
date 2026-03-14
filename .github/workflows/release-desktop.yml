@@ -174,12 +174,41 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          MAC_ARM_ASSET="release-assets/Nyro_${VERSION}_aarch64.dmg"
+          MAC_INTEL_ASSET="release-assets/Nyro_${VERSION}_x64.dmg"
+          LINUX_ARM_ASSET="release-assets/Nyro_${VERSION}_aarch64.AppImage"
+          LINUX_INTEL_ASSET="release-assets/Nyro_${VERSION}_amd64.AppImage"
+
+          for asset in "$MAC_ARM_ASSET" "$MAC_INTEL_ASSET" "$LINUX_ARM_ASSET" "$LINUX_INTEL_ASSET"; do
+            [ -f "$asset" ] || { echo "missing release asset: $asset"; exit 1; }
+          done
+
+          MAC_ARM_SHA="$(sha256sum "$MAC_ARM_ASSET" | awk '{print $1}')"
+          MAC_INTEL_SHA="$(sha256sum "$MAC_INTEL_ASSET" | awk '{print $1}')"
+          LINUX_ARM_SHA="$(sha256sum "$LINUX_ARM_ASSET" | awk '{print $1}')"
+          LINUX_INTEL_SHA="$(sha256sum "$LINUX_INTEL_ASSET" | awk '{print $1}')"
+
           git clone https://x-access-token:${GH_TOKEN}@github.com/shuaijinchao/homebrew-nyro.git /tmp/homebrew-nyro
           cd /tmp/homebrew-nyro
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/nyro.rb
+          VERSION="$VERSION" \
+          MAC_ARM_SHA="$MAC_ARM_SHA" \
+          MAC_INTEL_SHA="$MAC_INTEL_SHA" \
+          LINUX_ARM_SHA="$LINUX_ARM_SHA" \
+          LINUX_INTEL_SHA="$LINUX_INTEL_SHA" \
+          perl -0777 -i -pe '
+            my $version = $ENV{"VERSION"};
+            my $mac_arm = $ENV{"MAC_ARM_SHA"};
+            my $mac_intel = $ENV{"MAC_INTEL_SHA"};
+            my $linux_arm = $ENV{"LINUX_ARM_SHA"};
+            my $linux_intel = $ENV{"LINUX_INTEL_SHA"};
+            s/version ".*?"/version "$version"/;
+            s/^\s*sha256\s+:no_check\n//m;
+            s/(on_macos do\n\s+arch arm: "aarch64", intel: "x64")(?:\n\s+sha256 arm:\s*"[^"]+",\n\s+intel:\s*"[^"]+")?/$1\n    sha256 arm:   "$mac_arm",\n           intel: "$mac_intel"/s;
+            s/(on_linux do\n\s+arch arm: "aarch64", intel: "amd64")(?:\n\s+sha256 arm:\s*"[^"]+",\n\s+intel:\s*"[^"]+")?/$1\n    sha256 arm:   "$linux_arm",\n           intel: "$linux_intel"/s;
+          ' Casks/nyro.rb
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/nyro.rb
-          git diff --cached --quiet && echo "No version change" && exit 0
-          git commit -m "bump nyro to ${VERSION}"
+          git diff --cached --quiet && echo "No cask change" && exit 0
+          git commit -m "bump nyro to ${VERSION} with checksums"
           git push
