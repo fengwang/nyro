@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
@@ -105,62 +105,90 @@ impl AdminService {
     pub async fn test_provider(&self, id: &str) -> anyhow::Result<TestResult> {
         let provider = self.get_provider(id).await?;
         let start = Instant::now();
-
-        let req = if provider.protocol == "anthropic" {
-            let url = build_provider_url(&provider.base_url, "/v1/messages", &provider.protocol);
-            let body = serde_json::json!({
-                "model": "claude-3-haiku-20240307",
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1,
+        let base_url = provider.base_url.trim();
+        if base_url.is_empty() {
+            return Ok(TestResult {
+                success: false,
+                latency_ms: 0,
+                model: None,
+                error: Some("Base URL is empty".to_string()),
             });
-            self.gw.http_client
-                .post(url)
-                .header("x-api-key", &provider.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-        } else {
-            let url = build_provider_url(&provider.base_url, "/v1/chat/completions", &provider.protocol);
-            let body = serde_json::json!({
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1,
-            });
-            self.gw.http_client
-                .post(url)
-                .header("Authorization", format!("Bearer {}", provider.api_key))
-                .json(&body)
-        };
+        }
 
-        match req.send().await {
-            Ok(resp) => {
-                let latency = start.elapsed().as_millis() as u64;
-                let status = resp.status();
-                if status.is_success() {
-                    let json: serde_json::Value = resp.json().await.unwrap_or_default();
-                    let model = json.get("model").and_then(|v| v.as_str()).map(String::from);
-                    Ok(TestResult {
-                        success: true,
-                        latency_ms: latency,
-                        model,
-                        error: None,
-                    })
-                } else {
-                    let err_text = resp.text().await.unwrap_or_default();
-                    Ok(TestResult {
-                        success: false,
-                        latency_ms: latency,
-                        model: None,
-                        error: Some(format!("HTTP {}: {}", status.as_u16(), err_text.chars().take(200).collect::<String>())),
-                    })
-                }
-            }
+        if reqwest::Url::parse(base_url).is_err() {
+            return Ok(TestResult {
+                success: false,
+                latency_ms: 0,
+                model: None,
+                error: Some("Base URL format is invalid".to_string()),
+            });
+        }
+
+        match self
+            .gw
+            .http_client
+            .get(base_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            // Any HTTP response means the endpoint is reachable, including 4xx.
+            Ok(_) => Ok(TestResult {
+                success: true,
+                latency_ms: start.elapsed().as_millis() as u64,
+                model: None,
+                error: None,
+            }),
             Err(e) => Ok(TestResult {
                 success: false,
                 latency_ms: start.elapsed().as_millis() as u64,
                 model: None,
-                error: Some(e.to_string()),
+                error: Some(format_connectivity_error(&e)),
             }),
         }
+    }
+
+    pub async fn test_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        let provider = self.get_provider(id).await?;
+        let endpoint = provider
+            .models_endpoint
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Model Discovery URL is empty"))?
+            .to_string();
+
+        let mut request = self
+            .gw
+            .http_client
+            .get(&endpoint)
+            .headers(build_model_headers(&provider.protocol, &provider.api_key)?)
+            .timeout(Duration::from_secs(10));
+
+        if provider.protocol == "gemini" {
+            let separator = if endpoint.contains('?') { '&' } else { '?' };
+            request = self
+                .gw
+                .http_client
+                .get(format!("{endpoint}{separator}key={}", provider.api_key))
+                .timeout(Duration::from_secs(10));
+        }
+
+        let resp = request.send().await.map_err(|e| anyhow::anyhow!(format_connectivity_error(&e)))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let preview = body.chars().take(200).collect::<String>();
+            anyhow::bail!("HTTP {status}: {preview}");
+        }
+
+        let json: Value = resp.json().await.unwrap_or_default();
+        let models = extract_models_from_response(&provider.protocol, &json);
+        if models.is_empty() {
+            anyhow::bail!("Model list format is invalid or empty");
+        }
+
+        Ok(models)
     }
 
     pub async fn get_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
@@ -788,6 +816,16 @@ impl AdminService {
     }
 }
 
+fn format_connectivity_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "Connection timeout (10s), please check Base URL or network settings".to_string();
+    }
+    if error.is_connect() {
+        return "Unable to connect to the host, please check DNS/network settings".to_string();
+    }
+    error.to_string()
+}
+
 fn ensure_protocol(protocol: &str) -> anyhow::Result<()> {
     match protocol.trim().to_lowercase().as_str() {
         "openai" | "anthropic" | "gemini" => Ok(()),
@@ -800,25 +838,6 @@ fn ensure_virtual_model(model: &str) -> anyhow::Result<()> {
         anyhow::bail!("virtual_model cannot be empty");
     }
     Ok(())
-}
-
-fn build_provider_url(base_url: &str, path: &str, protocol: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    if protocol == "openai" {
-        let has_base_path = reqwest::Url::parse(base)
-            .ok()
-            .map(|url| {
-                let pathname = url.path().trim_end_matches('/');
-                !pathname.is_empty() && pathname != "/"
-            })
-            .unwrap_or(false);
-
-        if has_base_path && path.starts_with("/v1/") {
-            return format!("{base}{}", &path[3..]);
-        }
-    }
-
-    format!("{base}{path}")
 }
 
 fn resolve_models_endpoint(provider: &Provider) -> Option<String> {

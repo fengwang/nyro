@@ -47,6 +47,14 @@ pub async fn test_provider(gw: State<'_, Gateway>, id: String) -> Result<TestRes
 }
 
 #[tauri::command]
+pub async fn test_provider_models(gw: State<'_, Gateway>, id: String) -> Result<Vec<String>, String> {
+    gw.admin()
+        .test_provider_models(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_provider_models(
     gw: State<'_, Gateway>,
     id: String,

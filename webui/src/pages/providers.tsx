@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
 import type { Provider, CreateProvider, UpdateProvider, TestResult } from "@/lib/types";
 import {
@@ -23,6 +23,14 @@ import { NyroIcon } from "@/components/ui/nyro-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -30,6 +38,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 type ProviderProtocol = "openai" | "anthropic" | "gemini";
 
@@ -361,6 +370,57 @@ function FieldLabel({ children }: { children: string }) {
   return <label className="ml-1 text-xs leading-none font-normal text-slate-900">{children}</label>;
 }
 
+type TestLogLevel = "info" | "success" | "error";
+
+type TestLogEntry = {
+  timestamp: string;
+  level: TestLogLevel;
+  message: string;
+};
+
+const PROVIDER_TEST_RESULTS_STORAGE_KEY = "nyro.provider-test-results.v1";
+
+function nowTimestamp() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function loadProviderTestResults(): Record<string, TestResult> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PROVIDER_TEST_RESULTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, TestResult>;
+    if (!parsed || typeof parsed !== "object") return {};
+
+    const normalized: Record<string, TestResult> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== "object" || typeof value.success !== "boolean") continue;
+      normalized[id] = {
+        success: value.success,
+        latency_ms: Number.isFinite(value.latency_ms) ? value.latency_ms : 0,
+        model: typeof value.model === "string" ? value.model : undefined,
+        error: typeof value.error === "string" ? value.error : undefined,
+      };
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function saveProviderTestResults(results: Record<string, TestResult>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PROVIDER_TEST_RESULTS_STORAGE_KEY, JSON.stringify(results));
+  } catch {
+    // Ignore storage errors to avoid breaking provider UI.
+  }
+}
+
 export default function ProvidersPage() {
   const { locale } = useLocale();
   const isZh = locale === "zh-CN";
@@ -370,10 +430,17 @@ export default function ProvidersPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<Record<string, TestResult>>({});
+  const [testResult, setTestResult] = useState<Record<string, TestResult>>(loadProviderTestResults);
+  const [testDialogOpen, setTestDialogOpen] = useState(false);
+  const [testLogs, setTestLogs] = useState<TestLogEntry[]>([]);
+  const [isTestRunning, setIsTestRunning] = useState(false);
+  const [testTarget, setTestTarget] = useState<Provider | null>(null);
+  const [providerToDelete, setProviderToDelete] = useState<Provider | null>(null);
   const [selectedPresetId, setSelectedPresetId] = useState(DEFAULT_PRESET_ID);
   const [showCreateApiKey, setShowCreateApiKey] = useState(false);
   const [showEditApiKey, setShowEditApiKey] = useState(false);
+  const activeTestRunRef = useRef(0);
+  const logsContainerRef = useRef<HTMLDivElement | null>(null);
 
   const { data: providers = [], isLoading } = useQuery<Provider[]>({
     queryKey: ["providers"],
@@ -427,18 +494,152 @@ export default function ProvidersPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
   });
 
-  async function handleTest(id: string) {
-    setTestingId(id);
-    try {
-      const result = await backend<TestResult>("test_provider", { id });
-      setTestResult((prev) => ({ ...prev, [id]: result }));
-    } catch (e: unknown) {
-      setTestResult((prev) => ({
-        ...prev,
-        [id]: { success: false, latency_ms: 0, error: String(e) },
-      }));
-    }
+  function appendTestLog(level: TestLogLevel, message: string) {
+    setTestLogs((prev) => [...prev, { timestamp: nowTimestamp(), level, message }]);
+  }
+
+  function normalizeErrorMessage(error: unknown) {
+    if (error instanceof Error) return error.message;
+    return String(error);
+  }
+
+  function closeTestDialog() {
+    activeTestRunRef.current += 1;
+    setIsTestRunning(false);
     setTestingId(null);
+    setTestDialogOpen(false);
+  }
+
+  async function handleTest(provider: Provider) {
+    const runId = activeTestRunRef.current + 1;
+    activeTestRunRef.current = runId;
+    const isCanceled = () => activeTestRunRef.current !== runId;
+
+    setTestingId(provider.id);
+    setTestTarget(provider);
+    setTestLogs([]);
+    setTestDialogOpen(true);
+    setIsTestRunning(true);
+    setTestResult((prev) => {
+      const next = { ...prev };
+      delete next[provider.id];
+      return next;
+    });
+
+    const finish = (result: TestResult, finalMessage: string, level: "success" | "error") => {
+      if (isCanceled()) return;
+      appendTestLog(level, finalMessage);
+      setTestResult((prev) => ({ ...prev, [provider.id]: result }));
+      setIsTestRunning(false);
+      setTestingId(null);
+    };
+
+    try {
+      if (!provider.base_url) {
+        finish(
+          { success: false, latency_ms: 0, model: undefined, error: "Base URL is empty" },
+          isZh ? "✗ Base URL 为空，无法开始测试" : "✗ Base URL is empty, unable to start test",
+          "error",
+        );
+        return;
+      }
+
+      try {
+        new URL(provider.base_url);
+      } catch {
+        finish(
+          { success: false, latency_ms: 0, model: undefined, error: "Invalid Base URL format" },
+          isZh ? "✗ Base URL 格式不合法" : "✗ Base URL format is invalid",
+          "error",
+        );
+        return;
+      }
+
+      appendTestLog("info", isZh ? `开始测试 ${provider.name}...` : `Start testing ${provider.name}...`);
+      appendTestLog("info", isZh ? "▶ 连通性检测" : "▶ Connectivity check");
+      appendTestLog("info", `→ ${provider.base_url}`);
+
+      const connectivity = await backend<TestResult>("test_provider", { id: provider.id });
+      if (isCanceled()) return;
+
+      if (!connectivity.success) {
+        const reason = connectivity.error ?? (isZh ? "连接失败" : "Connectivity check failed");
+        finish(
+          {
+            success: false,
+            latency_ms: connectivity.latency_ms ?? 0,
+            model: undefined,
+            error: reason,
+          },
+          `${isZh ? "✗ 连通性检测失败" : "✗ Connectivity check failed"}: ${reason}`,
+          "error",
+        );
+        return;
+      }
+
+      appendTestLog(
+        "success",
+        `${isZh ? "✓ 连接成功，响应" : "✓ Connectivity ok, latency"} ${connectivity.latency_ms}ms`,
+      );
+
+      const modelsEndpoint = provider.models_endpoint?.trim();
+      if (!modelsEndpoint) {
+        finish(
+          { success: true, latency_ms: connectivity.latency_ms, model: undefined, error: undefined },
+          isZh ? "✓ 未配置 Model Discovery URL，测试完成" : "✓ Model Discovery URL not configured, test finished",
+          "success",
+        );
+        return;
+      }
+
+      appendTestLog("info", isZh ? "▶ 获取模型列表" : "▶ Fetch model list");
+      appendTestLog("info", `→ ${modelsEndpoint}`);
+
+      const models = await backend<string[]>("test_provider_models", { id: provider.id });
+      if (isCanceled()) return;
+
+      if (!models.length) {
+        finish(
+          {
+            success: false,
+            latency_ms: connectivity.latency_ms,
+            model: undefined,
+            error: isZh ? "模型列表为空或格式异常" : "Model list is empty or malformed",
+          },
+          isZh ? "✗ 模型列表为空或格式异常" : "✗ Model list is empty or malformed",
+          "error",
+        );
+        return;
+      }
+
+      appendTestLog(
+        "success",
+        `${isZh ? "✓ 认证通过，获取到" : "✓ Auth valid, fetched"} ${models.length} ${isZh ? "个模型" : "models"}`,
+      );
+      models.slice(0, 8).forEach((model) => appendTestLog("info", `· ${model}`));
+      if (models.length > 8) {
+        appendTestLog("info", isZh ? `· ... 还有 ${models.length - 8} 个` : `· ... and ${models.length - 8} more`);
+      }
+
+      finish(
+        {
+          success: true,
+          latency_ms: connectivity.latency_ms,
+          model: models[0],
+          error: undefined,
+        },
+        isZh ? "✓ 测试完成" : "✓ Test completed",
+        "success",
+      );
+    } catch (error: unknown) {
+      if (isCanceled()) return;
+      const message = normalizeErrorMessage(error);
+      finish(
+        { success: false, latency_ms: 0, model: undefined, error: message },
+        `${isZh ? "✗ 测试失败" : "✗ Test failed"}: ${message}`,
+        "error",
+      );
+    }
   }
 
   function startEdit(p: Provider) {
@@ -553,6 +754,32 @@ export default function ProvidersPage() {
       setPage(0);
     }
   }, [page, totalPages]);
+
+  useEffect(() => {
+    if (!logsContainerRef.current) return;
+    logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+  }, [testLogs]);
+
+  useEffect(() => {
+    saveProviderTestResults(testResult);
+  }, [testResult]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    const validIds = new Set(providers.map((provider) => provider.id));
+    setTestResult((prev) => {
+      let changed = false;
+      const next: Record<string, TestResult> = {};
+      for (const [id, result] of Object.entries(prev)) {
+        if (validIds.has(id)) {
+          next[id] = result;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [isLoading, providers]);
 
   return (
     <div className="space-y-6">
@@ -720,10 +947,7 @@ export default function ProvidersPage() {
                   <SelectContent>
                     {protocolOptions.map((option) => (
                       <SelectItem key={option.value} value={option.value}>
-                        <span className="flex items-center gap-2">
-                          <ProviderIcon protocol={option.value} size={16} monochrome />
-                          <span>{option.label}</span>
-                        </span>
+                        {option.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -738,7 +962,7 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className="space-y-2">
-                <FieldLabel>{isZh ? "Model Discovery" : "Model Discovery"}</FieldLabel>
+                <FieldLabel>Model Discovery URL</FieldLabel>
                 <Input
                   placeholder={isZh ? "可选，用于自动获取模型列表" : "Optional, used to auto-discover models"}
                   value={form.models_endpoint ?? ""}
@@ -797,6 +1021,7 @@ export default function ProvidersPage() {
         <div className="grid gap-4">
           {pagedProviders.map((p) => {
             const tr = testResult[p.id];
+            const status = tr ? (tr.success ? "success" : "failed") : null;
             const isEditing = editingId === p.id;
             const editingPresetId = editForm.preset_key || DEFAULT_PRESET_ID;
             const editingPreset =
@@ -941,10 +1166,7 @@ export default function ProvidersPage() {
                         <SelectContent>
                           {protocolOptions.map((option) => (
                             <SelectItem key={option.value} value={option.value}>
-                              <span className="flex items-center gap-2">
-                                <ProviderIcon protocol={option.value} size={16} monochrome />
-                                <span>{option.label}</span>
-                              </span>
+                              {option.label}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -959,7 +1181,7 @@ export default function ProvidersPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <FieldLabel>{isZh ? "Model Discovery" : "Model Discovery"}</FieldLabel>
+                      <FieldLabel>Model Discovery URL</FieldLabel>
                       <Input
                         placeholder={isZh ? "可选，用于自动获取模型列表" : "Optional, used to auto-discover models"}
                         value={editForm.models_endpoint ?? ""}
@@ -1046,40 +1268,35 @@ export default function ProvidersPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-semibold text-slate-900">{p.name}</span>
                         <span className="protocol-pill inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium uppercase">
-                          <ProviderIcon
-                            protocol={p.protocol}
-                            size={12}
-                            className="provider-preset-icon provider-preset-icon-colored rounded-sm border-0 bg-transparent"
-                          />
-                          <ProviderIcon
-                            protocol={p.protocol}
-                            size={12}
-                            monochrome
-                            className="provider-preset-icon provider-preset-icon-mono rounded-sm border-0 bg-transparent"
-                          />
                           {p.protocol}
                         </span>
-                        {p.is_active ? (
-                          <CheckCircle className="h-3.5 w-3.5 text-green-500" />
-                        ) : (
-                          <XCircle className="h-3.5 w-3.5 text-red-400" />
-                        )}
+                        {status === "success" ? (
+                          <CheckCircle
+                            className="h-3.5 w-3.5 text-green-500"
+                            aria-label={isZh ? "测试成功" : "Test passed"}
+                          />
+                        ) : status === "failed" ? (
+                          <XCircle
+                            className="h-3.5 w-3.5 text-red-400"
+                            aria-label={isZh ? "测试失败" : "Test failed"}
+                          />
+                        ) : null}
                       </div>
                       <p className="mt-0.5 text-xs text-slate-500">{p.base_url}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-0.5">
                     <button
-                      onClick={() => handleTest(p.id)}
-                      disabled={testingId === p.id}
-                      className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+                      onClick={() => handleTest(p)}
+                      disabled={Boolean(testingId)}
+                      title={isZh ? "测试" : "Test"}
+                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-500 cursor-pointer disabled:opacity-50"
                     >
                       {testingId === p.id ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Zap className="h-3.5 w-3.5" />
                       )}
-                      {isZh ? "测试" : "Test"}
                     </button>
                     <button
                       onClick={() => startEdit(p)}
@@ -1088,23 +1305,13 @@ export default function ProvidersPage() {
                       <Pencil className="h-4 w-4" />
                     </button>
                     <button
-                      onClick={() => deleteMut.mutate(p.id)}
+                      onClick={() => setProviderToDelete(p)}
                       className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 cursor-pointer"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
                 </div>
-                {tr && (
-                  <div className={`mt-3 rounded-xl px-4 py-2.5 text-xs ${
-                    tr.success ? "bg-green-50 text-green-700" : "bg-red-50 text-red-600"
-                  }`}>
-                    {tr.success
-                      ? `${isZh ? "连接成功" : "Connected"} — ${tr.latency_ms}ms${tr.model ? ` (${tr.model})` : ""}`
-                      : `${isZh ? "失败" : "Failed"} — ${tr.error}`
-                    }
-                  </div>
-                )}
               </div>
             );
           })}
@@ -1136,6 +1343,74 @@ export default function ProvidersPage() {
           )}
         </div>
       )}
+
+      <Dialog
+        open={testDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeTestDialog();
+          } else {
+            setTestDialogOpen(true);
+          }
+        }}
+      >
+        <DialogContent className="w-[min(92vw,720px)]">
+          <DialogHeader>
+            <DialogTitle>
+              {isZh ? `测试 ${testTarget?.name ?? ""}` : `Test ${testTarget?.name ?? ""}`}
+            </DialogTitle>
+            <DialogDescription>
+              {isZh ? "实时展示 Provider 测试日志" : "Real-time logs for provider testing"}
+            </DialogDescription>
+          </DialogHeader>
+          <div
+            ref={logsContainerRef}
+            className="h-64 overflow-y-auto rounded-lg border border-emerald-500/30 bg-[#050c1f] p-3 font-mono text-sm text-emerald-300 shadow-inner shadow-black/40"
+          >
+            {testLogs.length === 0 ? (
+              <p className="text-xs text-emerald-400/80">{isZh ? "等待测试开始..." : "Waiting for test to start..."}</p>
+            ) : (
+              testLogs.map((log, idx) => (
+                <p
+                  key={`${log.timestamp}-${idx}`}
+                  className="text-emerald-300"
+                >
+                  [{log.timestamp}] {log.message}
+                </p>
+              ))
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeTestDialog}>
+              {isTestRunning
+                ? (isZh ? "取消" : "Cancel")
+                : (isZh ? "关闭" : "Close")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(providerToDelete)}
+        onOpenChange={(open) => {
+          if (!open) setProviderToDelete(null);
+        }}
+        title={isZh ? "确认删除提供商" : "Confirm provider deletion"}
+        description={
+          providerToDelete
+            ? (isZh
+              ? `此操作不可撤销。确认删除「${providerToDelete.name}」吗？`
+              : `This action cannot be undone. Delete "${providerToDelete.name}"?`)
+            : undefined
+        }
+        cancelText={isZh ? "取消" : "Cancel"}
+        confirmText={isZh ? "删除" : "Delete"}
+        onConfirm={() => {
+          if (!providerToDelete) return;
+          deleteMut.mutate(providerToDelete.id);
+          setProviderToDelete(null);
+        }}
+      />
     </div>
   );
 }

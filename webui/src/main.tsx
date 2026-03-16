@@ -1,21 +1,22 @@
-import { StrictMode } from "react";
+import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { AppLayout } from "@/components/layout/app-layout";
 import { AppErrorBoundary } from "@/components/error-boundary";
-import DashboardPage from "@/pages/dashboard";
-import ProvidersPage from "@/pages/providers";
-import RoutesPage from "@/pages/routes";
-import ApiKeysPage from "@/pages/api-keys";
-import LogsPage from "@/pages/logs";
-import StatsPage from "@/pages/stats";
-import SettingsPage from "@/pages/settings";
-import ConnectPage from "@/pages/connect";
 import { LocaleProvider } from "@/lib/i18n";
 
 import "./index.css";
+
+const DashboardPage = lazy(() => import("@/pages/dashboard"));
+const ProvidersPage = lazy(() => import("@/pages/providers"));
+const RoutesPage = lazy(() => import("@/pages/routes"));
+const ApiKeysPage = lazy(() => import("@/pages/api-keys"));
+const LogsPage = lazy(() => import("@/pages/logs"));
+const StatsPage = lazy(() => import("@/pages/stats"));
+const SettingsPage = lazy(() => import("@/pages/settings"));
+const ConnectPage = lazy(() => import("@/pages/connect"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,18 +34,20 @@ createRoot(document.getElementById("root")!).render(
       <QueryClientProvider client={queryClient}>
         <LocaleProvider>
           <BrowserRouter>
-            <Routes>
-              <Route element={<AppLayout />}>
-                <Route index element={<DashboardPage />} />
-                <Route path="providers" element={<ProvidersPage />} />
-                <Route path="routes" element={<RoutesPage />} />
-                <Route path="api-keys" element={<ApiKeysPage />} />
-                <Route path="logs" element={<LogsPage />} />
-                <Route path="stats" element={<StatsPage />} />
-                <Route path="connect" element={<ConnectPage />} />
-                <Route path="settings" element={<SettingsPage />} />
-              </Route>
-            </Routes>
+            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Loading...</div>}>
+              <Routes>
+                <Route element={<AppLayout />}>
+                  <Route index element={<DashboardPage />} />
+                  <Route path="providers" element={<ProvidersPage />} />
+                  <Route path="routes" element={<RoutesPage />} />
+                  <Route path="api-keys" element={<ApiKeysPage />} />
+                  <Route path="logs" element={<LogsPage />} />
+                  <Route path="stats" element={<StatsPage />} />
+                  <Route path="connect" element={<ConnectPage />} />
+                  <Route path="settings" element={<SettingsPage />} />
+                </Route>
+              </Routes>
+            </Suspense>
           </BrowserRouter>
         </LocaleProvider>
       </QueryClientProvider>

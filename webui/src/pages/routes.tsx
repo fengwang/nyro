@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Select,
   SelectContent,
@@ -60,6 +61,7 @@ export default function RoutesPage() {
   const [createForm, setCreateForm] = useState<RouteForm>(emptyCreate);
   const [editForm, setEditForm] = useState<(RouteForm & { id: string }) | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const [routeToDelete, setRouteToDelete] = useState<RouteType | null>(null);
 
   const { data: routes = [], isLoading } = useQuery<RouteType[]>({
     queryKey: ["routes"],
@@ -521,7 +523,7 @@ export default function RoutesPage() {
                     </span>
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-0.5">
                   <button
                     onClick={() => startEdit(route)}
                     className="cursor-pointer rounded-lg p-2 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-500"
@@ -529,7 +531,7 @@ export default function RoutesPage() {
                     <Pencil className="h-4 w-4" />
                   </button>
                   <button
-                    onClick={() => deleteMut.mutate(route.id)}
+                    onClick={() => setRouteToDelete(route)}
                     className="cursor-pointer rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
                   >
                     <Trash2 className="h-4 w-4" />
@@ -566,6 +568,28 @@ export default function RoutesPage() {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(routeToDelete)}
+        onOpenChange={(open) => {
+          if (!open) setRouteToDelete(null);
+        }}
+        title={isZh ? "确认删除路由" : "Confirm route deletion"}
+        description={
+          routeToDelete
+            ? (isZh
+              ? `此操作不可撤销。确认删除「${routeToDelete.name}」吗？`
+              : `This action cannot be undone. Delete "${routeToDelete.name}"?`)
+            : undefined
+        }
+        cancelText={isZh ? "取消" : "Cancel"}
+        confirmText={isZh ? "删除" : "Delete"}
+        onConfirm={() => {
+          if (!routeToDelete) return;
+          deleteMut.mutate(routeToDelete.id);
+          setRouteToDelete(null);
+        }}
+      />
     </div>
   );
 }

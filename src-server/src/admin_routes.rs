@@ -55,6 +55,7 @@ pub fn create_router(gateway: Gateway, admin_key: Option<String>) -> Router {
         .route("/providers", get(list_providers).post(create_provider_handler))
         .route("/providers/:id", providers_item)
         .route("/providers/:id/test", get(test_provider_handler))
+        .route("/providers/:id/test-models", get(test_provider_models_handler))
         .route("/providers/:id/models", get(provider_models_handler))
         .route("/routes", get(list_routes_handler).post(create_route_handler))
         .route("/routes/:id", routes_item)
@@ -137,6 +138,16 @@ async fn test_provider_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match gw.admin().test_provider(&id).await {
+        Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn test_provider_models_handler(
+    State(gw): State<Gateway>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match gw.admin().test_provider_models(&id).await {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => err(e),
     }

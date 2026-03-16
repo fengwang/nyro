@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Copy, KeyRound, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Copy, KeyRound, Pencil, Plus, Trash2, X } from "lucide-react";
 
 import { backend } from "@/lib/backend";
 import type { ApiKey, CreateApiKey, Route as RouteType, UpdateApiKey } from "@/lib/types";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { MultiSelect } from "@/components/ui/multi-select";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
   DialogContent,
@@ -119,6 +120,8 @@ export default function ApiKeysPage() {
   const [copiedEditKey, setCopiedEditKey] = useState(false);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [showCreatedDialog, setShowCreatedDialog] = useState(false);
+  const [copiedCreatedKey, setCopiedCreatedKey] = useState(false);
+  const [apiKeyToDelete, setApiKeyToDelete] = useState<ApiKey | null>(null);
 
   const { data: apiKeys = [], isLoading } = useQuery<ApiKey[]>({
     queryKey: ["api-keys"],
@@ -564,12 +567,21 @@ export default function ApiKeysPage() {
                       : (isZh ? "未绑定（默认拒绝）" : "Unbound (deny by default)")}
                   </p>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-0.5">
                   <button
                     onClick={() => copyKey(item)}
-                    className="cursor-pointer rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                    title={copiedId === item.id ? (isZh ? "复制成功" : "Copied") : (isZh ? "复制 Key" : "Copy Key")}
+                    className={`cursor-pointer rounded-lg p-2 transition-colors ${
+                      copiedId === item.id
+                        ? "text-green-500 hover:bg-green-50 hover:text-green-500"
+                        : "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                    }`}
                   >
-                    <Copy className="h-4 w-4" />
+                    {copiedId === item.id ? (
+                      <Check className="h-4 w-4" />
+                    ) : (
+                      <Copy className="h-4 w-4" />
+                    )}
                   </button>
                   <button
                     onClick={() => startEdit(item)}
@@ -578,15 +590,12 @@ export default function ApiKeysPage() {
                     <Pencil className="h-4 w-4" />
                   </button>
                   <button
-                    onClick={() => deleteMut.mutate(item.id)}
+                    onClick={() => setApiKeyToDelete(item)}
                     className="cursor-pointer rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
-                {copiedId === item.id && (
-                  <span className="ml-2 text-xs text-green-600">{isZh ? "已复制" : "Copied"}</span>
-                )}
               </div>
             );
           })}
@@ -619,7 +628,13 @@ export default function ApiKeysPage() {
         </div>
       )}
 
-      <Dialog open={showCreatedDialog} onOpenChange={setShowCreatedDialog}>
+      <Dialog
+        open={showCreatedDialog}
+        onOpenChange={(open) => {
+          setShowCreatedDialog(open);
+          if (!open) setCopiedCreatedKey(false);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{isZh ? "API Key 创建成功" : "API Key Created"}</DialogTitle>
@@ -635,7 +650,10 @@ export default function ApiKeysPage() {
           <DialogFooter>
             <Button
               variant="secondary"
-              onClick={() => setShowCreatedDialog(false)}
+              onClick={() => {
+                setShowCreatedDialog(false);
+                setCopiedCreatedKey(false);
+              }}
             >
               {isZh ? "关闭" : "Close"}
             </Button>
@@ -643,13 +661,36 @@ export default function ApiKeysPage() {
               onClick={async () => {
                 if (!createdKey) return;
                 await navigator.clipboard.writeText(createdKey);
+                setCopiedCreatedKey(true);
               }}
             >
-              {isZh ? "复制 Key" : "Copy Key"}
+              {copiedCreatedKey ? (isZh ? "已复制" : "Copied") : (isZh ? "复制" : "Copy")}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(apiKeyToDelete)}
+        onOpenChange={(open) => {
+          if (!open) setApiKeyToDelete(null);
+        }}
+        title={isZh ? "确认删除 API Key" : "Confirm API key deletion"}
+        description={
+          apiKeyToDelete
+            ? (isZh
+              ? `此操作不可撤销。确认删除「${apiKeyToDelete.name}」吗？`
+              : `This action cannot be undone. Delete "${apiKeyToDelete.name}"?`)
+            : undefined
+        }
+        cancelText={isZh ? "取消" : "Cancel"}
+        confirmText={isZh ? "删除" : "Delete"}
+        onConfirm={() => {
+          if (!apiKeyToDelete) return;
+          deleteMut.mutate(apiKeyToDelete.id);
+          setApiKeyToDelete(null);
+        }}
+      />
     </div>
   );
 }

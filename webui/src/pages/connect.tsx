@@ -1,8 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Loader2, TerminalSquare, Wrench } from "lucide-react";
-import SyntaxHighlighter from "react-syntax-highlighter";
-import { atomOneDark, github } from "react-syntax-highlighter/dist/esm/styles/hljs";
 
 import { backend, IS_TAURI } from "@/lib/backend";
 import type { ApiKey, GatewayStatus, Route as RouteType } from "@/lib/types";
@@ -18,6 +16,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { ProviderIcon } from "@/components/ui/provider-icon";
+
+const CodeHighlighter = lazy(() => import("@/components/ui/code-highlighter"));
 
 type CodeLanguage = "python" | "typescript" | "curl";
 type CliToolId = "claude-code" | "codex-cli" | "gemini-cli" | "opencode";
@@ -465,7 +465,6 @@ export default function ConnectPage() {
     apiKey: cliEffectiveApiKey,
     model: cliModel,
   });
-  const highlighterStyle = isDarkTheme ? atomOneDark : github;
   const cliPreviewLang = "bash";
 
   function formatCliError(error: unknown) {
@@ -634,16 +633,14 @@ export default function ConnectPage() {
                   >
                     {copiedTarget === "code" ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                   </button>
-                  <SyntaxHighlighter
-                    language={syntaxLanguage(codeLang)}
-                    style={highlighterStyle}
-                    customStyle={{ margin: 0, borderRadius: 8, padding: 0, background: "transparent" }}
-                    codeTagProps={{ style: { fontSize: "13px", lineHeight: "1.55" } }}
-                    showLineNumbers={false}
-                    wrapLongLines
-                  >
-                    {generatedCode}
-                  </SyntaxHighlighter>
+                  <Suspense fallback={<pre className="overflow-x-auto text-xs text-slate-500">{generatedCode}</pre>}>
+                    <CodeHighlighter
+                      code={generatedCode}
+                      language={syntaxLanguage(codeLang)}
+                      dark={isDarkTheme}
+                      padding={0}
+                    />
+                  </Suspense>
                 </div>
               </div>
             )}
@@ -779,16 +776,14 @@ export default function ConnectPage() {
                   >
                     {copiedTarget === "cli" ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                   </button>
-                  <SyntaxHighlighter
-                    language={cliPreviewLang}
-                    style={highlighterStyle}
-                    customStyle={{ margin: 0, borderRadius: 8, padding: "14px 16px", background: "transparent" }}
-                    codeTagProps={{ style: { fontSize: "13px", lineHeight: "1.55" } }}
-                    showLineNumbers={false}
-                    wrapLongLines
-                  >
-                    {cliPreview}
-                  </SyntaxHighlighter>
+                  <Suspense fallback={<pre className="overflow-x-auto text-xs text-slate-500">{cliPreview}</pre>}>
+                    <CodeHighlighter
+                      code={cliPreview}
+                      language={cliPreviewLang}
+                      dark={isDarkTheme}
+                      padding="14px 16px"
+                    />
+                  </Suspense>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
