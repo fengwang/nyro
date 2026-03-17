@@ -221,7 +221,14 @@ export default function RoutesPage() {
               <FieldLabel>{isZh ? "目标提供商" : "Target Provider"}</FieldLabel>
               <Select
                 value={createForm.target_provider || undefined}
-                onValueChange={(value) => setCreateForm((prev) => ({ ...prev, target_provider: value }))}
+                onValueChange={(value) =>
+                  setCreateForm((prev) => ({
+                    ...prev,
+                    target_provider: value,
+                    target_model: "",
+                    virtual_model: "",
+                  }))
+                }
               >
                 <SelectTrigger>
                   <SelectValue placeholder={isZh ? "选择提供商" : "Select provider"} />
@@ -269,7 +276,7 @@ export default function RoutesPage() {
               </div>
             )}
             <div className="space-y-2">
-              <FieldLabel>{isZh ? "虚拟模型名" : "Virtual Model"}</FieldLabel>
+              <FieldLabel>{isZh ? "虚拟模型" : "Virtual Model"}</FieldLabel>
               <Input
                 value={createForm.virtual_model}
                 onChange={(e) => setCreateForm((prev) => ({ ...prev, virtual_model: e.target.value }))}
@@ -382,7 +389,16 @@ export default function RoutesPage() {
                       <Select
                         value={editForm.target_provider}
                         onValueChange={(value) =>
-                          setEditForm((prev) => (prev ? { ...prev, target_provider: value } : prev))
+                          setEditForm((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  target_provider: value,
+                                  target_model: "",
+                                  virtual_model: "",
+                                }
+                              : prev
+                          )
                         }
                       >
                         <SelectTrigger>
@@ -434,7 +450,7 @@ export default function RoutesPage() {
                       </div>
                     )}
                     <div className="space-y-2">
-                      <FieldLabel>{isZh ? "虚拟模型名" : "Virtual Model"}</FieldLabel>
+                      <FieldLabel>{isZh ? "虚拟模型" : "Virtual Model"}</FieldLabel>
                       <Input
                         value={editForm.virtual_model}
                         onChange={(e) =>

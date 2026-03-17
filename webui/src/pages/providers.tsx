@@ -74,6 +74,7 @@ function protocolUrl(protocol: string) {
 
 const emptyCreate: CreateProvider = {
   name: "",
+  vendor: undefined,
   protocol: "openai",
   base_url: "https://api.openai.com",
   preset_key: "",
@@ -455,6 +456,7 @@ export default function ProvidersPage() {
   const [editForm, setEditForm] = useState<UpdateProvider & { id: string }>({
     id: "",
     name: "",
+    vendor: undefined,
     protocol: "",
     base_url: "",
     preset_key: "",
@@ -648,6 +650,7 @@ export default function ProvidersPage() {
     setEditForm({
       id: p.id,
       name: p.name,
+      vendor: p.vendor ?? (p.preset_key || undefined),
       protocol: p.protocol,
       base_url: p.base_url,
       preset_key: p.preset_key || DEFAULT_PRESET_ID,
@@ -668,6 +671,7 @@ export default function ProvidersPage() {
       setForm({
         ...emptyCreate,
         name: "",
+        vendor: undefined,
         protocol: "openai",
         base_url: "",
         preset_key: DEFAULT_PRESET_ID,
@@ -682,6 +686,7 @@ export default function ProvidersPage() {
     setForm((prev) => ({
       ...prev,
       name: preset.label.en,
+      vendor: preset.id,
       protocol: preset.defaultProtocol,
       base_url: config.baseUrl,
       preset_key: preset.id,
@@ -710,7 +715,9 @@ export default function ProvidersPage() {
     if (!preset) return;
 
     if (preset.id === DEFAULT_PRESET_ID) {
-      setEditForm((prev) => (prev ? { ...prev, preset_key: DEFAULT_PRESET_ID, channel: "default" } : prev));
+      setEditForm((prev) =>
+        prev ? { ...prev, vendor: undefined, preset_key: DEFAULT_PRESET_ID, channel: "default" } : prev,
+      );
       return;
     }
 
@@ -722,6 +729,7 @@ export default function ProvidersPage() {
             const config = resolvePresetConfig(preset, nextProtocol, nextChannelId);
             return {
               ...prev,
+              vendor: preset.id === DEFAULT_PRESET_ID ? undefined : preset.id,
               preset_key: preset.id,
               channel: nextChannelId,
               protocol: nextProtocol,
@@ -1215,6 +1223,7 @@ export default function ProvidersPage() {
                         setEditError(null);
                         const input: UpdateProvider = {
                           name: editForm.name || undefined,
+                          vendor: editForm.vendor || undefined,
                           protocol: editForm.protocol || undefined,
                           base_url: editForm.base_url || undefined,
                           preset_key: editForm.preset_key || undefined,

@@ -1,6 +1,7 @@
 export interface Provider {
   id: string;
   name: string;
+  vendor?: string | null;
   protocol: string;
   base_url: string;
   api_key?: string;
@@ -108,6 +109,7 @@ export interface TestResult {
 
 export interface CreateProvider {
   name: string;
+  vendor?: string;
   protocol: string;
   base_url: string;
   preset_key?: string;
@@ -119,6 +121,7 @@ export interface CreateProvider {
 
 export interface UpdateProvider {
   name?: string;
+  vendor?: string;
   protocol?: string;
   base_url?: string;
   preset_key?: string;
@@ -187,6 +190,7 @@ export interface ExportData {
 
 export interface ExportProvider {
   name: string;
+  vendor?: string | null;
   protocol: string;
   base_url: string;
   preset_key?: string | null;
