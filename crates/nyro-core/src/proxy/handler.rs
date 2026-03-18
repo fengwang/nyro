@@ -123,6 +123,7 @@ async fn proxy_pipeline(
         route.target_model.clone()
     };
 
+    maybe_normalize_minimax_responses_messages(&provider, ingress, &mut internal);
     maybe_strip_ollama_tools(&gw, &provider, &actual_model, &mut internal).await;
 
     let egress: Protocol = provider.protocol.parse().unwrap_or(Protocol::OpenAI);
@@ -176,6 +177,74 @@ async fn proxy_pipeline(
         )
         .await
     }
+}
+
+fn maybe_normalize_minimax_responses_messages(
+    provider: &Provider,
+    ingress: Protocol,
+    req: &mut InternalRequest,
+) {
+    // MiniMax 在部分 OpenAI 兼容路径下会拒绝 role=system。
+    // Codex 使用 Responses API 时常带 instructions/developer，我们在此折叠为 user 文本，避免 2013 报错。
+    if ingress != Protocol::ResponsesAPI || !is_minimax_provider(provider) {
+        return;
+    }
+
+    let mut system_instructions: Vec<String> = Vec::new();
+    let mut normalized_messages: Vec<InternalMessage> = Vec::with_capacity(req.messages.len());
+
+    for msg in req.messages.drain(..) {
+        if msg.role == Role::System {
+            let text = msg.content.as_text();
+            if !text.trim().is_empty() {
+                system_instructions.push(text);
+            }
+            continue;
+        }
+        normalized_messages.push(msg);
+    }
+
+    if system_instructions.is_empty() {
+        req.messages = normalized_messages;
+        return;
+    }
+
+    let merged_instructions = format!(
+        "[System Instructions]\n{}",
+        system_instructions.join("\n\n")
+    );
+
+    if let Some(first_user) = normalized_messages.iter_mut().find(|m| m.role == Role::User) {
+        match &mut first_user.content {
+            MessageContent::Text(text) => {
+                if text.trim().is_empty() {
+                    *text = merged_instructions;
+                } else {
+                    *text = format!("{merged_instructions}\n\n{text}");
+                }
+            }
+            MessageContent::Blocks(blocks) => {
+                blocks.insert(
+                    0,
+                    ContentBlock::Text {
+                        text: format!("{merged_instructions}\n\n"),
+                    },
+                );
+            }
+        }
+    } else {
+        normalized_messages.insert(
+            0,
+            InternalMessage {
+                role: Role::User,
+                content: MessageContent::Text(merged_instructions),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        );
+    }
+
+    req.messages = normalized_messages;
 }
 
 async fn maybe_strip_ollama_tools(
@@ -293,6 +362,18 @@ fn is_ollama_provider(provider: &Provider) -> bool {
         .vendor
         .as_deref()
         .is_some_and(|v| v.eq_ignore_ascii_case("ollama"))
+}
+
+fn is_minimax_provider(provider: &Provider) -> bool {
+    if provider
+        .vendor
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("minimax"))
+    {
+        return true;
+    }
+
+    provider.base_url.contains("minimax")
 }
 
 #[allow(clippy::too_many_arguments)]
