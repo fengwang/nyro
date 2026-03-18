@@ -6,6 +6,28 @@ import { cn } from "@/lib/utils";
 import { IS_TAURI } from "@/lib/backend";
 import { useLocale } from "@/lib/i18n";
 
+const NON_DRAGGABLE_SELECTOR = [
+  "[data-no-drag]",
+  "[role]",
+  "[tabindex]",
+  "[contenteditable='']",
+  "[contenteditable='true']",
+  "[data-slot]",
+  "[cmdk-root]",
+  "[cmdk-input]",
+  "[cmdk-item]",
+  "button",
+  "a",
+  "input",
+  "select",
+  "textarea",
+  "label",
+  "option",
+  "summary",
+  "svg",
+  "path",
+].join(",");
+
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
@@ -38,11 +60,7 @@ export function AppLayout() {
   async function handleSurfaceMouseDown(e: React.MouseEvent<HTMLElement>) {
     if (!IS_TAURI || e.button !== 0) return;
     const target = e.target as HTMLElement;
-    if (
-      target.closest(
-        "button,a,input,select,textarea,label,[role='button'],[data-no-drag],svg,path"
-      )
-    ) {
+    if (target.closest(NON_DRAGGABLE_SELECTOR)) {
       return;
     }
     try {
