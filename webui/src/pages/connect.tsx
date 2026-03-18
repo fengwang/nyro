@@ -87,6 +87,11 @@ function jsonText(input: unknown) {
   return JSON.stringify(input, null, 2);
 }
 
+function encodeGeminiModelForPath(model: string) {
+  // Keep ":" readable for model variants like gemma3:1b.
+  return encodeURIComponent(model).replace(/%3A/gi, ":");
+}
+
 function codeTemplate(params: {
   protocol: RouteType["ingress_protocol"];
   model: string;
@@ -117,7 +122,7 @@ function codeTemplate(params: {
     messages: [{ role: "user", content: "Hello" }],
   })}'`;
     }
-    return `curl ${host}/v1beta/models/${encodeURIComponent(model)}:generateContent \\
+    return `curl ${host}/v1beta/models/${encodeGeminiModelForPath(model)}:generateContent \\
   -H "x-goog-api-key: ${apiKey}" \\
   -H "Content-Type: application/json" \\
   -d '${jsonText({
