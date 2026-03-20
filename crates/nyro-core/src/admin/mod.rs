@@ -144,10 +144,37 @@ impl AdminService {
     }
 
     pub async fn delete_provider(&self, id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM providers WHERE id = ?")
+        let route_ref_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM routes WHERE target_provider = ?",
+        )
+        .bind(id)
+        .fetch_one(&self.gw.db)
+        .await
+        .unwrap_or(0);
+        if route_ref_count > 0 {
+            return Err(coded_error(
+                "PROVIDER_IN_USE",
+                &format!("provider is used by {route_ref_count} routes"),
+                serde_json::json!({ "id": id, "routeCount": route_ref_count }),
+            ));
+        }
+
+        let delete_result = sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind(id)
             .execute(&self.gw.db)
-            .await?;
+            .await;
+        if let Err(e) = delete_result {
+            if let sqlx::Error::Database(db_err) = &e {
+                if db_err.code().as_deref() == Some("787") {
+                    return Err(coded_error(
+                        "PROVIDER_IN_USE",
+                        "provider is still referenced by other resources",
+                        serde_json::json!({ "id": id }),
+                    ));
+                }
+            }
+            return Err(e.into());
+        }
         self.gw.clear_ollama_capability_cache_for_provider(id).await;
         Ok(())
     }
@@ -984,7 +1011,16 @@ impl AdminService {
         };
 
         if exists.is_some() {
-            anyhow::bail!("route already exists for protocol={normalized_protocol}, model={normalized_model}");
+            return Err(coded_error(
+                "ROUTE_PROTOCOL_MODEL_CONFLICT",
+                &format!(
+                    "route already exists for protocol={normalized_protocol}, model={normalized_model}"
+                ),
+                serde_json::json!({
+                    "protocol": normalized_protocol,
+                    "model": normalized_model,
+                }),
+            ));
         }
         Ok(())
     }
