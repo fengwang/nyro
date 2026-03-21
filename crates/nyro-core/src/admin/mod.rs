@@ -265,7 +265,11 @@ impl AdminService {
             .gw
             .http_client
             .get(&endpoint)
-            .headers(build_model_headers(&provider.protocol, &provider.api_key)?)
+            .headers(build_model_headers(
+                &provider.protocol,
+                provider.vendor.as_deref(),
+                &provider.api_key,
+            )?)
             .timeout(Duration::from_secs(10));
 
         if provider.protocol == "gemini" {
@@ -274,6 +278,11 @@ impl AdminService {
                 .gw
                 .http_client
                 .get(format!("{endpoint}{separator}key={}", provider.api_key))
+                .headers(build_model_headers(
+                    &provider.protocol,
+                    provider.vendor.as_deref(),
+                    &provider.api_key,
+                )?)
                 .timeout(Duration::from_secs(10));
         }
 
@@ -286,7 +295,7 @@ impl AdminService {
         }
 
         let json: Value = resp.json().await.unwrap_or_default();
-        let models = extract_models_from_response(&provider.protocol, &json);
+        let models = extract_models_from_response(&provider.protocol, provider.vendor.as_deref(), &json);
         if models.is_empty() {
             anyhow::bail!("Model list format is invalid or empty");
         }
@@ -308,20 +317,33 @@ impl AdminService {
                 .gw
                 .http_client
                 .get(&endpoint)
-                .headers(build_model_headers(&provider.protocol, &provider.api_key)?);
+                .headers(build_model_headers(
+                    &provider.protocol,
+                    provider.vendor.as_deref(),
+                    &provider.api_key,
+                )?);
 
             if provider.protocol == "gemini" {
                 let separator = if endpoint.contains('?') { '&' } else { '?' };
                 request = self
                     .gw
                     .http_client
-                    .get(format!("{endpoint}{separator}key={}", provider.api_key));
+                    .get(format!("{endpoint}{separator}key={}", provider.api_key))
+                    .headers(build_model_headers(
+                        &provider.protocol,
+                        provider.vendor.as_deref(),
+                        &provider.api_key,
+                    )?);
             }
 
             if let Ok(resp) = request.send().await {
                 if resp.status().is_success() {
                     let json: Value = resp.json().await.unwrap_or_default();
-                    let models = extract_models_from_response(&provider.protocol, &json);
+                    let models = extract_models_from_response(
+                        &provider.protocol,
+                        provider.vendor.as_deref(),
+                        &json,
+                    );
                     if !models.is_empty() {
                         return Ok(models);
                     }
@@ -386,7 +408,11 @@ impl AdminService {
             .gw
             .http_client
             .get(url)
-            .headers(build_model_headers(&provider.protocol, &provider.api_key)?)
+            .headers(build_model_headers(
+                &provider.protocol,
+                provider.vendor.as_deref(),
+                &provider.api_key,
+            )?)
             .timeout(Duration::from_secs(10));
 
         if provider.protocol == "gemini" {
@@ -395,6 +421,11 @@ impl AdminService {
                 .gw
                 .http_client
                 .get(format!("{url}{separator}key={}", provider.api_key))
+                .headers(build_model_headers(
+                    &provider.protocol,
+                    provider.vendor.as_deref(),
+                    &provider.api_key,
+                )?)
                 .timeout(Duration::from_secs(10));
         }
 
@@ -1236,14 +1267,30 @@ fn resolve_models_endpoint(provider: &Provider) -> Option<String> {
     }
 }
 
-fn build_model_headers(protocol: &str, api_key: &str) -> anyhow::Result<HeaderMap> {
+fn build_model_headers(
+    protocol: &str,
+    vendor: Option<&str>,
+    api_key: &str,
+) -> anyhow::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
+    let is_google_vendor = vendor
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("google"));
     match protocol {
         "anthropic" => {
             headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         }
-        "gemini" => {}
+        "gemini" => {
+            // Google providers may expose OpenAI-compatible /v1/models endpoints.
+            // Add Bearer auth in addition to Gemini key query param.
+            if is_google_vendor {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {api_key}"))?,
+                );
+            }
+        }
         _ => {
             headers.insert(
                 AUTHORIZATION,
@@ -1254,25 +1301,42 @@ fn build_model_headers(protocol: &str, api_key: &str) -> anyhow::Result<HeaderMa
     Ok(headers)
 }
 
-fn extract_models_from_response(protocol: &str, json: &Value) -> Vec<String> {
-    let mut models = match protocol {
-        "gemini" => json
+fn extract_models_from_response(protocol: &str, vendor: Option<&str>, json: &Value) -> Vec<String> {
+    let is_google_vendor = vendor
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("google"));
+    let mut models = json
+        .get("data")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+        .map(|id| {
+            if is_google_vendor {
+                id.strip_prefix("models/").unwrap_or(id).to_string()
+            } else {
+                id.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if models.is_empty() && protocol == "gemini" {
+        models = json
             .get("models")
             .and_then(|value| value.as_array())
             .into_iter()
             .flatten()
             .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
-            .map(|name| name.rsplit('/').next().unwrap_or(name).to_string())
-            .collect::<Vec<_>>(),
-        _ => json
-            .get("data")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-    };
+            .map(|name| {
+                let normalized = name.rsplit('/').next().unwrap_or(name);
+                if is_google_vendor {
+                    normalized.strip_prefix("models/").unwrap_or(normalized).to_string()
+                } else {
+                    normalized.to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+    }
 
     models.sort();
     models.dedup();
