@@ -1,6 +1,9 @@
 use nyro_core::protocol::anthropic::stream::AnthropicResponseFormatter;
 use nyro_core::protocol::anthropic::decoder::AnthropicDecoder;
 use nyro_core::protocol::anthropic::encoder::AnthropicEncoder;
+use nyro_core::protocol::gemini::encoder::GeminiEncoder;
+use nyro_core::protocol::gemini::stream::GeminiStreamFormatter;
+use nyro_core::protocol::openai::stream::OpenAIStreamFormatter;
 use nyro_core::protocol::openai::encoder::OpenAIEncoder;
 use nyro_core::protocol::openai::responses::decoder::ResponsesDecoder;
 use nyro_core::protocol::openai::responses::formatter::ResponsesResponseFormatter;
@@ -8,9 +11,10 @@ use nyro_core::protocol::semantic::reasoning::normalize_response_reasoning;
 use nyro_core::protocol::semantic::tool_correlation::normalize_request_tool_results;
 use nyro_core::protocol::types::{
     ContentBlock, InternalMessage, InternalRequest, InternalResponse, MessageContent, ResponseItem, Role,
+    StreamDelta,
     TokenUsage, ToolCall, ToolDef,
 };
-use nyro_core::protocol::{IngressDecoder, Protocol, ResponseFormatter};
+use nyro_core::protocol::{IngressDecoder, Protocol, ResponseFormatter, StreamFormatter};
 use nyro_core::protocol::EgressEncoder;
 
 #[test]
@@ -93,6 +97,71 @@ fn openai_to_responses_reasoning_and_function_call_items() {
 }
 
 #[test]
+fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {
+    let resp = InternalResponse {
+        id: "gen_1".to_string(),
+        model: "gemini-2.5-flash".to_string(),
+        content: String::new(),
+        reasoning_content: None,
+        tool_calls: vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            arguments: "{\"command\":\"ls\"}".to_string(),
+        }],
+        response_items: None,
+        stop_reason: Some("stop".to_string()),
+        usage: TokenUsage {
+            input_tokens: 44,
+            output_tokens: 13,
+        },
+    };
+
+    let out = nyro_core::protocol::openai::stream::OpenAIResponseFormatter.format_response(&resp);
+    let finish_reason = out
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|v| v.as_str());
+    assert_eq!(finish_reason, Some("tool_calls"));
+}
+
+#[test]
+fn openai_stream_formatter_sets_tool_calls_finish_reason_when_tool_calls_seen() {
+    let mut fmt = OpenAIStreamFormatter::new();
+    let events = fmt.format_deltas(&[
+        StreamDelta::MessageStart {
+            id: "gen_1".to_string(),
+            model: "gemini-2.5-flash".to_string(),
+        },
+        StreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+        },
+        StreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: "{\"command\":\"ls\"}".to_string(),
+        },
+        StreamDelta::Done {
+            stop_reason: "stop".to_string(),
+        },
+    ]);
+    let last_json = events
+        .iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .last()
+        .expect("has final json");
+    let finish_reason = last_json
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|v| v.as_str());
+    assert_eq!(finish_reason, Some("tool_calls"));
+}
+
+#[test]
 fn gemini_tool_result_correlation_success() {
     let mut req = InternalRequest {
         messages: vec![
@@ -133,6 +202,62 @@ fn gemini_tool_result_correlation_success() {
         Some("call_abc"),
         "tool result should be correlated to previous assistant tool_call id"
     );
+}
+
+#[test]
+fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
+    let mut req = InternalRequest {
+        messages: vec![
+            InternalMessage {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_a".to_string(),
+                        name: "Glob".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    ToolCall {
+                        id: "call_b".to_string(),
+                        name: "Bash".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                ]),
+                tool_call_id: None,
+            },
+            InternalMessage {
+                role: Role::Tool,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_b".to_string(),
+                    content: serde_json::json!({"ok": true}),
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            InternalMessage {
+                role: Role::Tool,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_a".to_string(),
+                    content: serde_json::json!({"ok": true}),
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ],
+        model: "minimax-m2.7".to_string(),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        tools: None,
+        tool_choice: None,
+        source_protocol: Protocol::Gemini,
+        extra: Default::default(),
+    };
+
+    normalize_request_tool_results(&mut req);
+    assert_eq!(req.messages[1].tool_call_id.as_deref(), Some("call_b"));
+    assert_eq!(req.messages[2].tool_call_id.as_deref(), Some("call_a"));
 }
 
 #[test]
@@ -438,6 +563,12 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
                 tool_calls: None,
                 tool_call_id: Some("call_dup".to_string()),
             },
+            InternalMessage {
+                role: Role::Tool,
+                content: MessageContent::Text("{\"ok\":true}".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call_dup".to_string()),
+            },
         ],
         model: "MiniMax-M2.7".to_string(),
         stream: false,
@@ -466,13 +597,14 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
 
-    let tool_id = messages
+    let tool_ids: Vec<String> = messages
         .iter()
-        .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"))
-        .and_then(|m| m.get("tool_call_id"))
-        .and_then(|v| v.as_str())
-        .expect("tool_call_id exists");
-    assert_eq!(tool_id, ids[1]);
+        .filter(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"))
+        .filter_map(|m| m.get("tool_call_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    assert_eq!(tool_ids.len(), 2);
+    assert!(ids.contains(&tool_ids[0]));
+    assert!(ids.contains(&tool_ids[1]));
 }
 
 #[test]
@@ -629,6 +761,68 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
         first_blocks[1].get("text").and_then(|v| v.as_str()),
         Some("second")
     );
+}
+
+#[test]
+fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
+    let req = InternalRequest {
+        messages: vec![
+            InternalMessage {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_function_abc_1".to_string(),
+                    name: "glob".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                tool_call_id: None,
+            },
+            InternalMessage {
+                role: Role::Tool,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_function_abc_1".to_string(),
+                    content: serde_json::json!({"ok": true}),
+                }]),
+                tool_calls: None,
+                tool_call_id: Some("call_function_abc_1".to_string()),
+            },
+        ],
+        model: "MiniMax-M2.7".to_string(),
+        stream: false,
+        temperature: None,
+        max_tokens: Some(256),
+        top_p: None,
+        tools: Some(vec![ToolDef {
+            name: "glob".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }]),
+        tool_choice: None,
+        source_protocol: Protocol::Gemini,
+        extra: Default::default(),
+    };
+
+    let (body, _) = AnthropicEncoder.encode_request(&req).expect("encode anthropic body");
+    let msgs = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .expect("messages");
+    let tool_use_id = msgs[0]
+        .get("content")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|b| b.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let tool_result_id = msgs[1]
+        .get("content")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|b| b.get("tool_use_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(tool_use_id.starts_with("toolu_"));
+    assert_eq!(tool_use_id, tool_result_id);
 }
 
 #[test]
@@ -802,4 +996,246 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
         .unwrap_or("");
     assert_eq!(id1, prev1);
     assert_eq!(id2, prev2);
+}
+
+#[test]
+fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
+    let req = InternalRequest {
+        messages: vec![
+            InternalMessage {
+                role: Role::System,
+                content: MessageContent::Text("sys".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            InternalMessage {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_old_1".to_string(),
+                        name: String::new(),
+                        arguments: "{}".to_string(),
+                    },
+                    ToolCall {
+                        id: "call_old_2".to_string(),
+                        name: "list_directory".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                ]),
+                tool_call_id: None,
+            },
+            InternalMessage {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_new".to_string(),
+                    name: "glob".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                tool_call_id: None,
+            },
+            InternalMessage {
+                role: Role::Tool,
+                content: MessageContent::Text("{\"ok\":true}".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call_new".to_string()),
+            },
+        ],
+        model: "MiniMax-M2.7".to_string(),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        tools: Some(vec![ToolDef {
+            name: "glob".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }]),
+        tool_choice: None,
+        source_protocol: Protocol::Gemini,
+        extra: Default::default(),
+    };
+
+    let (body, _) = OpenAIEncoder.encode_request(&req).expect("encode");
+    let msgs = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .expect("messages");
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[0].get("role").and_then(|v| v.as_str()), Some("system"));
+    assert_eq!(msgs[1].get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(msgs[2].get("role").and_then(|v| v.as_str()), Some("tool"));
+    let call_id = msgs[1]
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|tc| tc.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(call_id, "call_new");
+}
+
+#[test]
+fn gemini_stream_formatter_keeps_tool_name_for_argument_deltas() {
+    let mut fmt = GeminiStreamFormatter::new();
+    let deltas = vec![
+        StreamDelta::MessageStart {
+            id: "x".to_string(),
+            model: "m".to_string(),
+        },
+        StreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".to_string(),
+            name: "run_shell_command".to_string(),
+        },
+        StreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: "{\"command\":\"ls -la\"}".to_string(),
+        },
+    ];
+    let events = fmt.format_deltas(&deltas);
+    let mut saw_named_call = false;
+    let mut saw_command_arg = false;
+    for ev in events {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.data) else {
+            continue;
+        };
+        let part = v
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|p| p.get("functionCall"));
+        if let Some(fc) = part {
+            if fc.get("name").and_then(|n| n.as_str()) == Some("run_shell_command") {
+                saw_named_call = true;
+            }
+            if fc
+                .get("args")
+                .and_then(|a| a.get("command"))
+                .and_then(|c| c.as_str())
+                == Some("ls -la")
+            {
+                saw_command_arg = true;
+            }
+        }
+    }
+    assert!(saw_named_call);
+    assert!(saw_command_arg);
+}
+
+#[test]
+fn gemini_stream_formatter_normalizes_common_tool_argument_aliases() {
+    let mut fmt = GeminiStreamFormatter::new();
+    let deltas = vec![
+        StreamDelta::MessageStart {
+            id: "x".to_string(),
+            model: "m".to_string(),
+        },
+        StreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".to_string(),
+            name: "glob".to_string(),
+        },
+        StreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: "{\"include_pattern\":\"**/*.py\",\"search_root\":\"/tmp/work\",\"exclude_pattern\":\"**/.venv/**\"}".to_string(),
+        },
+    ];
+    let events = fmt.format_deltas(&deltas);
+    let payload = events
+        .iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .find_map(|v| {
+            v.get("candidates")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|c| c.get("content"))
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|p| p.get("functionCall"))
+                .cloned()
+        })
+        .expect("functionCall payload");
+
+    assert_eq!(
+        payload.get("name").and_then(|v| v.as_str()),
+        Some("glob")
+    );
+    let args = payload.get("args").expect("args object");
+    assert_eq!(args.get("pattern").and_then(|v| v.as_str()), Some("**/*.py"));
+    assert_eq!(args.get("root_dir").and_then(|v| v.as_str()), Some("/tmp/work"));
+    assert_eq!(
+        args.get("exclude_patterns")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str()),
+        Some("**/.venv/**")
+    );
+}
+
+#[test]
+fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
+    let req = InternalRequest {
+        messages: vec![InternalMessage {
+            role: Role::User,
+            content: MessageContent::Text("hello".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        model: "gemini-2.5-flash".to_string(),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        tools: Some(vec![ToolDef {
+            name: "glob".to_string(),
+            description: Some("glob files".to_string()),
+            parameters: serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/$defs/entry",
+                            "ref": "legacy"
+                        }
+                    }
+                },
+                "$defs": {
+                    "entry": {"type":"string"}
+                }
+            }),
+        }]),
+        tool_choice: None,
+        source_protocol: Protocol::OpenAI,
+        extra: Default::default(),
+    };
+
+    let (body, _) = GeminiEncoder.encode_request(&req).expect("encode");
+    let params = body
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("functionDeclarations"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("parameters"))
+        .cloned()
+        .expect("parameters");
+
+    let rendered = params.to_string();
+    assert!(!rendered.contains("$schema"));
+    assert!(!rendered.contains("additionalProperties"));
+    assert!(!rendered.contains("$ref"));
+    assert!(!rendered.contains("\"ref\""));
+    assert!(!rendered.contains("$defs"));
 }
