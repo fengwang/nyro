@@ -4,6 +4,33 @@ All notable changes to Nyro will be documented in this file.
 
 ---
 
+## v1.4.0
+
+> Released on 2026-03-21
+
+#### Features
+
+- **Protocol normalization layer upgrade**: add semantic internal response normalization and emit item-level reasoning/function-call outputs for Responses API flows
+- **Provider preset capability unification**: unify provider preset handling with capability source parsing and ship an embedded models.dev snapshot for offline metadata
+- **Connect CLI workflow enhancements**: align Codex/OpenCode sync outputs with runtime defaults, refine route state anchoring, and improve config action UX
+
+#### Improvements
+
+- **WebUI configuration interactions**: refine provider preset behaviors and route-edit model interactions for more predictable admin flows
+- **Admin error surface consistency**: return structured provider/route conflict payloads and localize conflict messages in the UI
+- **CLI panel layout polish**: reorder API key vs update-config controls, keep half-width action layout, and align preview hint spacing/offset behavior
+- **Local UX defaults**: default initial locale state to `en-US` and render request timestamps in local timezone in Logs
+
+#### Fixes
+
+- Fix cross-protocol tool-call semantics by hardening tool-call/result correlation and normalizing thinking/text delta behavior across adapters
+- Fix Google model discovery auth path and model normalization in admin provider discovery flow
+
+#### Tests & Docs
+
+- Add protocol regression coverage for tool IDs, finish reasons, schema mapping, and provider-policy removal behavior
+- Add protocol architecture hardening design doc and refresh README/UI screenshots for latest console pages
+
 ## v1.3.0
 
 > Released on 2026-03-18
