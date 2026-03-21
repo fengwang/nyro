@@ -1,16 +1,32 @@
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use crate::protocol::types::*;
 use crate::protocol::{SseEvent, StreamFormatter};
+
+struct PendingFunctionCall {
+    output_index: usize,
+    item_id: String,
+    call_id: String,
+    name: String,
+    arguments: String,
+}
 
 pub struct ResponsesStreamFormatter {
     resp_id: String,
     msg_id: String,
     model: String,
     accumulated_text: String,
+    accumulated_reasoning: String,
     usage: TokenUsage,
     started: bool,
     completed: bool,
+    next_output_index: usize,
+    reasoning_item_id: Option<String>,
+    reasoning_output_index: Option<usize>,
+    tool_index_map: HashMap<usize, usize>,
+    tool_calls: Vec<PendingFunctionCall>,
 }
 
 impl ResponsesStreamFormatter {
@@ -20,10 +36,24 @@ impl ResponsesStreamFormatter {
             msg_id: format!("msg_{}", Uuid::new_v4().simple()),
             model: String::new(),
             accumulated_text: String::new(),
+            accumulated_reasoning: String::new(),
             usage: TokenUsage::default(),
             started: false,
             completed: false,
+            next_output_index: 1,
+            reasoning_item_id: None,
+            reasoning_output_index: None,
+            tool_index_map: HashMap::new(),
+            tool_calls: Vec::new(),
         }
+    }
+
+    fn ensure_started(&mut self, events: &mut Vec<SseEvent>) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        events.extend(self.emit_preamble());
     }
 
     fn emit_preamble(&mut self) -> Vec<SseEvent> {
@@ -45,10 +75,7 @@ impl ResponsesStreamFormatter {
                 "output_text": ""
             }
         });
-        events.push(SseEvent::new(
-            Some("response.created"),
-            created.to_string(),
-        ));
+        events.push(SseEvent::new(Some("response.created"), created.to_string()));
 
         let in_progress = serde_json::json!({
             "type": "response.in_progress",
@@ -99,7 +126,46 @@ impl ResponsesStreamFormatter {
     }
 
     fn emit_completed(&mut self) -> Vec<SseEvent> {
-        let mut events = Vec::with_capacity(4);
+        let mut events = Vec::new();
+
+        if let (Some(item_id), Some(output_index)) = (&self.reasoning_item_id, self.reasoning_output_index)
+        {
+            let reasoning_done = serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": {
+                    "type": "reasoning",
+                    "id": item_id,
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": self.accumulated_reasoning
+                    }]
+                }
+            });
+            events.push(SseEvent::new(
+                Some("response.output_item.done"),
+                reasoning_done.to_string(),
+            ));
+        }
+
+        for call in &self.tool_calls {
+            let tool_done = serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": call.output_index,
+                "item": {
+                    "type": "function_call",
+                    "id": call.item_id,
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "status": "completed"
+                }
+            });
+            events.push(SseEvent::new(
+                Some("response.output_item.done"),
+                tool_done.to_string(),
+            ));
+        }
 
         let text_done = serde_json::json!({
             "type": "response.output_text.done",
@@ -149,6 +215,39 @@ impl ResponsesStreamFormatter {
             item_done.to_string(),
         ));
 
+        let mut output: Vec<serde_json::Value> = Vec::new();
+        if let Some(item_id) = &self.reasoning_item_id {
+            output.push(serde_json::json!({
+                "type": "reasoning",
+                "id": item_id,
+                "summary": [{
+                    "type": "summary_text",
+                    "text": self.accumulated_reasoning
+                }]
+            }));
+        }
+        for call in &self.tool_calls {
+            output.push(serde_json::json!({
+                "type": "function_call",
+                "id": call.item_id,
+                "call_id": call.call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "status": "completed"
+            }));
+        }
+        output.push(serde_json::json!({
+            "type": "message",
+            "id": self.msg_id,
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": self.accumulated_text,
+                "annotations": []
+            }]
+        }));
+
         let completed = serde_json::json!({
             "type": "response.completed",
             "response": {
@@ -156,17 +255,7 @@ impl ResponsesStreamFormatter {
                 "object": "response",
                 "status": "completed",
                 "model": self.model,
-                "output": [{
-                    "type": "message",
-                    "id": self.msg_id,
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": [{
-                        "type": "output_text",
-                        "text": self.accumulated_text,
-                        "annotations": []
-                    }]
-                }],
+                "output": output,
                 "output_text": self.accumulated_text,
                 "usage": {
                     "input_tokens": self.usage.input_tokens,
@@ -195,16 +284,45 @@ impl StreamFormatter for ResponsesStreamFormatter {
                         self.resp_id = id.clone();
                     }
                     self.model = model.clone();
-                    if !self.started {
-                        self.started = true;
-                        events.extend(self.emit_preamble());
+                    self.ensure_started(&mut events);
+                }
+                StreamDelta::ReasoningDelta(text) => {
+                    self.ensure_started(&mut events);
+                    if self.reasoning_item_id.is_none() {
+                        let item_id = format!("rs_{}", Uuid::new_v4().simple());
+                        let output_index = self.next_output_index;
+                        self.next_output_index += 1;
+                        self.reasoning_item_id = Some(item_id.clone());
+                        self.reasoning_output_index = Some(output_index);
+                        let added = serde_json::json!({
+                            "type": "response.output_item.added",
+                            "output_index": output_index,
+                            "item": {
+                                "type": "reasoning",
+                                "id": item_id,
+                                "summary": []
+                            }
+                        });
+                        events.push(SseEvent::new(
+                            Some("response.output_item.added"),
+                            added.to_string(),
+                        ));
                     }
+                    self.accumulated_reasoning.push_str(text);
+                    let ev = serde_json::json!({
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": self.reasoning_item_id,
+                        "output_index": self.reasoning_output_index,
+                        "summary_index": 0,
+                        "delta": text
+                    });
+                    events.push(SseEvent::new(
+                        Some("response.reasoning_summary_text.delta"),
+                        ev.to_string(),
+                    ));
                 }
                 StreamDelta::TextDelta(text) => {
-                    if !self.started {
-                        self.started = true;
-                        events.extend(self.emit_preamble());
-                    }
+                    self.ensure_started(&mut events);
                     self.accumulated_text.push_str(text);
                     let ev = serde_json::json!({
                         "type": "response.output_text.delta",
@@ -218,6 +336,60 @@ impl StreamFormatter for ResponsesStreamFormatter {
                         ev.to_string(),
                     ));
                 }
+                StreamDelta::ToolCallStart { index, id, name } => {
+                    self.ensure_started(&mut events);
+                    let output_index = self.next_output_index;
+                    self.next_output_index += 1;
+                    let item_id = format!("fc_{}", Uuid::new_v4().simple());
+                    let call_id = if id.is_empty() {
+                        format!("call_{}", Uuid::new_v4().simple())
+                    } else {
+                        id.clone()
+                    };
+
+                    self.tool_index_map.insert(*index, self.tool_calls.len());
+                    self.tool_calls.push(PendingFunctionCall {
+                        output_index,
+                        item_id: item_id.clone(),
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                    });
+
+                    let added = serde_json::json!({
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "type": "function_call",
+                            "id": item_id,
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": "",
+                            "status": "in_progress"
+                        }
+                    });
+                    events.push(SseEvent::new(
+                        Some("response.output_item.added"),
+                        added.to_string(),
+                    ));
+                }
+                StreamDelta::ToolCallDelta { index, arguments } => {
+                    if let Some(pos) = self.tool_index_map.get(index).copied() {
+                        if let Some(call) = self.tool_calls.get_mut(pos) {
+                            call.arguments.push_str(arguments);
+                            let ev = serde_json::json!({
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": call.item_id,
+                                "output_index": call.output_index,
+                                "delta": arguments
+                            });
+                            events.push(SseEvent::new(
+                                Some("response.function_call_arguments.delta"),
+                                ev.to_string(),
+                            ));
+                        }
+                    }
+                }
                 StreamDelta::Usage(u) => {
                     self.usage = u.clone();
                 }
@@ -227,7 +399,6 @@ impl StreamFormatter for ResponsesStreamFormatter {
                         events.extend(self.emit_completed());
                     }
                 }
-                _ => {}
             }
         }
 
