@@ -2,6 +2,7 @@ pub mod types;
 pub mod openai;
 pub mod anthropic;
 pub mod gemini;
+pub mod semantic;
 
 use reqwest::header::HeaderMap;
 

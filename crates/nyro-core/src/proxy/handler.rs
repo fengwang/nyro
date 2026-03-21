@@ -123,7 +123,7 @@ async fn proxy_pipeline(
         route.target_model.clone()
     };
 
-    maybe_normalize_minimax_responses_messages(&provider, ingress, &mut internal);
+    crate::protocol::semantic::tool_correlation::normalize_request_tool_results(&mut internal);
     maybe_strip_ollama_tools(&gw, &provider, &actual_model, &mut internal).await;
 
     let egress: Protocol = provider.protocol.parse().unwrap_or(Protocol::OpenAI);
@@ -136,7 +136,6 @@ async fn proxy_pipeline(
 
     let egress_body = override_model(egress_body, &actual_model, egress);
     let egress_path = encoder.egress_path(&actual_model, is_stream);
-
     let client = ProxyClient::new(gw.http_client.clone());
     let egress_str = egress.to_string();
 
@@ -179,73 +178,6 @@ async fn proxy_pipeline(
     }
 }
 
-fn maybe_normalize_minimax_responses_messages(
-    provider: &Provider,
-    ingress: Protocol,
-    req: &mut InternalRequest,
-) {
-    // MiniMax 在部分 OpenAI 兼容路径下会拒绝 role=system。
-    // Codex 使用 Responses API 时常带 instructions/developer，我们在此折叠为 user 文本，避免 2013 报错。
-    if ingress != Protocol::ResponsesAPI || !is_minimax_provider(provider) {
-        return;
-    }
-
-    let mut system_instructions: Vec<String> = Vec::new();
-    let mut normalized_messages: Vec<InternalMessage> = Vec::with_capacity(req.messages.len());
-
-    for msg in req.messages.drain(..) {
-        if msg.role == Role::System {
-            let text = msg.content.as_text();
-            if !text.trim().is_empty() {
-                system_instructions.push(text);
-            }
-            continue;
-        }
-        normalized_messages.push(msg);
-    }
-
-    if system_instructions.is_empty() {
-        req.messages = normalized_messages;
-        return;
-    }
-
-    let merged_instructions = format!(
-        "[System Instructions]\n{}",
-        system_instructions.join("\n\n")
-    );
-
-    if let Some(first_user) = normalized_messages.iter_mut().find(|m| m.role == Role::User) {
-        match &mut first_user.content {
-            MessageContent::Text(text) => {
-                if text.trim().is_empty() {
-                    *text = merged_instructions;
-                } else {
-                    *text = format!("{merged_instructions}\n\n{text}");
-                }
-            }
-            MessageContent::Blocks(blocks) => {
-                blocks.insert(
-                    0,
-                    ContentBlock::Text {
-                        text: format!("{merged_instructions}\n\n"),
-                    },
-                );
-            }
-        }
-    } else {
-        normalized_messages.insert(
-            0,
-            InternalMessage {
-                role: Role::User,
-                content: MessageContent::Text(merged_instructions),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        );
-    }
-
-    req.messages = normalized_messages;
-}
 
 async fn maybe_strip_ollama_tools(
     gw: &Gateway,
@@ -364,18 +296,6 @@ fn is_ollama_provider(provider: &Provider) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("ollama"))
 }
 
-fn is_minimax_provider(provider: &Provider) -> bool {
-    if provider
-        .vendor
-        .as_deref()
-        .is_some_and(|v| v.eq_ignore_ascii_case("minimax"))
-    {
-        return true;
-    }
-
-    provider.base_url.contains("minimax")
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_non_stream(
     gw: Gateway,
@@ -436,10 +356,12 @@ async fn handle_non_stream(
     let parser = crate::protocol::get_response_parser(egress);
     let formatter = crate::protocol::get_response_formatter(ingress);
 
-    let internal_resp = match parser.parse_response(resp) {
+    let mut internal_resp = match parser.parse_response(resp) {
         Ok(r) => r,
         Err(e) => return error_response(500, &format!("parse error: {e}")),
     };
+    crate::protocol::semantic::reasoning::normalize_response_reasoning(&mut internal_resp);
+    crate::protocol::semantic::response_items::populate_response_items(&mut internal_resp);
 
     let is_tool = !internal_resp.tool_calls.is_empty();
     let usage = internal_resp.usage.clone();
