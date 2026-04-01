@@ -1,19 +1,13 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, TerminalSquare } from "lucide-react";
+import { Check, Code2, Copy, TerminalSquare } from "lucide-react";
 
 import { backend, IS_TAURI } from "@/lib/backend";
 import { localizeBackendErrorMessage } from "@/lib/backend-error";
 import type { ApiKey, GatewayStatus, ModelCapabilities, Route as RouteType } from "@/lib/types";
 import { useLocale } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Combobox } from "@/components/ui/combobox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { ProviderIcon } from "@/components/ui/provider-icon";
@@ -23,13 +17,22 @@ const CodeHighlighter = lazy(() => import("@/components/ui/code-highlighter"));
 
 type CodeLanguage = "python" | "typescript" | "curl";
 type CliToolId = "claude-code" | "codex-cli" | "gemini-cli" | "opencode";
+type GatewayProtocol = "openai" | "anthropic" | "gemini";
+type CodeProtocol = GatewayProtocol;
 
 type CliTool = {
   id: CliToolId;
   name: string;
   iconKey: string;
-  protocol: "openai" | "anthropic" | "gemini";
+  protocol: GatewayProtocol;
   desc: { zh: string; en: string };
+};
+
+type CodeProtocolOption = {
+  id: CodeProtocol;
+  name: string;
+  iconKey: string;
+  apiPath: string;
 };
 
 const CLI_TOOLS: CliTool[] = [
@@ -64,6 +67,11 @@ const CLI_TOOLS: CliTool[] = [
 ];
 
 const CODE_LANGS: CodeLanguage[] = ["python", "typescript", "curl"];
+const CODE_PROTOCOLS: CodeProtocolOption[] = [
+  { id: "openai", name: "OpenAI", iconKey: "openai", apiPath: "/v1/chat/completions" },
+  { id: "anthropic", name: "Anthropic", iconKey: "anthropic", apiPath: "/v1/messages" },
+  { id: "gemini", name: "Gemini", iconKey: "gemini", apiPath: "/v1beta/models/{model}:generateContent" },
+];
 const OPTIONAL_KEY_PLACEHOLDER = "sk-00000000000000000000000000000000";
 const UNSELECTED_KEY_PLACEHOLDER = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 const CLI_ROUTE_ANCHOR_STORAGE_KEY = "nyro.connect.cli.route-anchor.v1";
@@ -73,7 +81,7 @@ function maskApiKey(key: string) {
   return `${key.slice(0, 12)}••`;
 }
 
-function protocolLabel(protocol: RouteType["ingress_protocol"], isZh: boolean) {
+function protocolLabel(protocol: GatewayProtocol, isZh: boolean) {
   if (isZh) {
     if (protocol === "openai") return "OpenAI";
     if (protocol === "anthropic") return "Anthropic";
@@ -82,6 +90,12 @@ function protocolLabel(protocol: RouteType["ingress_protocol"], isZh: boolean) {
   if (protocol === "openai") return "OpenAI";
   if (protocol === "anthropic") return "Anthropic";
   return "Gemini";
+}
+
+function protocolApiPath(protocol: CodeProtocol) {
+  if (protocol === "openai") return "/v1/chat/completions";
+  if (protocol === "anthropic") return "/v1/messages";
+  return "/v1beta/models/{model}:generateContent";
 }
 
 function jsonText(input: unknown) {
@@ -94,7 +108,7 @@ function encodeGeminiModelForPath(model: string) {
 }
 
 function codeTemplate(params: {
-  protocol: RouteType["ingress_protocol"];
+  protocol: CodeProtocol;
   model: string;
   apiKey: string;
   host: string;
@@ -255,9 +269,8 @@ function cliPreviewTemplate(params: {
   host: string;
   apiKey: string;
   model: string;
-  capabilities?: ModelCapabilities | null;
 }) {
-  const { tool, host, apiKey, model, capabilities } = params;
+  const { tool, host, apiKey, model } = params;
   if (tool.id === "claude-code") {
     return `# ~/.claude/settings.json
 {
@@ -265,7 +278,6 @@ function cliPreviewTemplate(params: {
     "ANTHROPIC_AUTH_TOKEN": "${apiKey}",
     "ANTHROPIC_BASE_URL": "${host}",
     "ANTHROPIC_MODEL": "${model}",
-    "ANTHROPIC_REASONING_MODEL": "${model}",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${model}",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "${model}",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "${model}"
@@ -274,10 +286,8 @@ function cliPreviewTemplate(params: {
 }`;
   }
   if (tool.id === "codex-cli") {
-    const reasoningLine = capabilities?.reasoning ? 'model_reasoning_effort = "high"\n' : "";
-    const modelContextWindow = capabilities?.context_window && capabilities.context_window > 0
-      ? capabilities.context_window
-      : 128000;
+    const codexModel = model;
+    const codexBaseUrl = `${host}/v1`;
     return `# ~/.codex/auth.json
 {
   "OPENAI_API_KEY": "${apiKey}"
@@ -285,39 +295,16 @@ function cliPreviewTemplate(params: {
 
 # ~/.codex/config.toml
 model_provider = "nyro"
-model = "${model}"
-model_context_window = 128000
-${reasoningLine}model_catalog_json = "~/.codex/nyro-models.json"
+model = "${codexModel}"
+model_reasoning_effort = "high"
 disable_response_storage = true
 
+[model_providers]
 [model_providers.nyro]
 name = "Nyro Gateway"
-base_url = "${host}/v1"
+base_url = "${codexBaseUrl}"
 wire_api = "responses"
-requires_openai_auth = true
-
-# ~/.codex/nyro-models.json
-{
-  "models": [
-    {
-      "slug": "${model}",
-      "display_name": "${model}",
-      "supported_reasoning_levels": [],
-      "shell_type": "shell_command",
-      "visibility": "list",
-      "supported_in_api": true,
-      "priority": 1,
-      "base_instructions": "",
-      "supports_reasoning_summaries": false,
-      "support_verbosity": false,
-      "apply_patch_tool_type": "freeform",
-      "truncation_policy": { "mode": "tokens", "limit": 10000 },
-      "supports_parallel_tool_calls": false,
-      "experimental_supported_tools": [],
-      "context_window": ${modelContextWindow}
-    }
-  ]
-}`;
+requires_openai_auth = true`;
   }
   if (tool.id === "gemini-cli") {
     return `# ~/.gemini/.env
@@ -364,6 +351,7 @@ export default function ConnectPage() {
 
   const [tab, setTab] = useState<"code" | "cli">("cli");
   const [codeLang, setCodeLang] = useState<CodeLanguage>("python");
+  const [selectedCodeProtocol, setSelectedCodeProtocol] = useState<CodeProtocol>("openai");
   const [selectedCodeRouteId, setSelectedCodeRouteId] = useState("");
   const [selectedCliRouteId, setSelectedCliRouteId] = useState("");
   const [selectedCodeKeyId, setSelectedCodeKeyId] = useState("");
@@ -490,16 +478,15 @@ export default function ConnectPage() {
 
   const codeEffectiveApiKey =
     selectedRoute?.access_control ? selectedApiKey?.key ?? UNSELECTED_KEY_PLACEHOLDER : OPTIONAL_KEY_PLACEHOLDER;
-  const host = `http://localhost:${status?.proxy_port ?? 3000}`;
+  const proxyPort = status?.proxy_port;
+  const hasProxyPort = typeof proxyPort === "number" && Number.isFinite(proxyPort) && proxyPort > 0;
+  const host = hasProxyPort ? `http://localhost:${proxyPort}` : "http://localhost:<proxy-port>";
   const codeModel = selectedRoute?.virtual_model ?? "gpt-4o";
-  const codeProtocol = selectedRoute?.ingress_protocol ?? "openai";
+  const codeProtocol = selectedCodeProtocol;
   const selectedCliTool =
     CLI_TOOLS.find((tool) => tool.id === selectedCliToolId) ?? CLI_TOOLS.find((tool) => tool.id === "claude-code")!;
   const selectedCliReady = IS_TAURI ? Boolean(cliReadyStatus[selectedCliTool.id]) : true;
-  const cliRoutes = useMemo(
-    () => routes.filter((route) => route.ingress_protocol === selectedCliTool.protocol),
-    [routes, selectedCliTool.protocol],
-  );
+  const cliRoutes = routes;
   const selectedCliRoute = useMemo(
     () => cliRoutes.find((route) => route.id === selectedCliRouteId) ?? null,
     [cliRoutes, selectedCliRouteId],
@@ -571,6 +558,7 @@ export default function ConnectPage() {
   const cliModel = selectedCliRoute?.virtual_model ?? "gpt-4o";
   const canSyncCli =
     IS_TAURI &&
+    hasProxyPort &&
     selectedCliReady &&
     Boolean(selectedCliRoute) &&
     (!selectedCliRoute?.access_control || Boolean(selectedCliApiKey));
@@ -587,7 +575,6 @@ export default function ConnectPage() {
     host,
     apiKey: cliEffectiveApiKey,
     model: cliModel,
-    capabilities: selectedCliCapabilities,
   });
   const cliPreviewLang = "bash";
 
@@ -709,11 +696,19 @@ export default function ConnectPage() {
 
       <div className="connect-panel glass rounded-2xl p-5">
         <Tabs value={tab} onValueChange={(next) => setTab(next as "code" | "cli")} className="space-y-3">
-          <TabsList className="h-11 w-fit rounded-xl px-1.5">
-            <TabsTrigger className="h-9 min-w-[108px] text-sm font-semibold" value="cli">
-              {isZh ? "CLI 接入" : "CLI"}
+          <TabsList className="connect-switch-tabs-list grid h-12 w-full grid-cols-2 rounded-xl p-1 md:w-1/2">
+            <TabsTrigger
+              className="connect-switch-tab-trigger h-10 gap-1.5 text-sm font-medium"
+              value="cli"
+            >
+              <TerminalSquare className="h-4 w-4" />
+              {isZh ? "工具接入" : "CLI"}
             </TabsTrigger>
-            <TabsTrigger className="h-9 min-w-[108px] text-sm font-semibold" value="code">
+            <TabsTrigger
+              className="connect-switch-tab-trigger h-10 gap-1.5 text-sm font-medium"
+              value="code"
+            >
+              <Code2 className="h-4 w-4" />
               {isZh ? "代码接入" : "Code"}
             </TabsTrigger>
           </TabsList>
@@ -733,19 +728,19 @@ export default function ConnectPage() {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-start gap-3">
-                        <div className="mt-0.5 inline-flex h-8 w-8 items-center justify-center">
+                        <div className="mt-0.5 inline-flex h-9 w-9 items-center justify-center">
                           <ProviderIcon
                             iconKey={tool.iconKey}
                             name={tool.name}
                             protocol={tool.protocol}
-                            size={26}
+                            size={30}
                             className="provider-preset-icon provider-preset-icon-colored rounded-none border-0 bg-transparent"
                           />
                           <ProviderIcon
                             iconKey={tool.iconKey}
                             name={tool.name}
                             protocol={tool.protocol}
-                            size={26}
+                            size={30}
                             monochrome
                             className="provider-preset-icon provider-preset-icon-mono rounded-none border-0 bg-transparent"
                           />
@@ -755,7 +750,7 @@ export default function ConnectPage() {
                           <p className="mt-1 text-sm text-slate-500">{isZh ? tool.desc.zh : tool.desc.en}</p>
                         </div>
                       </div>
-                      <Badge variant={isReady ? "success" : "secondary"}>
+                      <Badge variant={isReady ? "success" : "secondary"} className="connect-label-badge">
                         {IS_TAURI
                           ? isReady
                             ? (isZh ? "已就绪" : "Ready")
@@ -772,8 +767,8 @@ export default function ConnectPage() {
               <div className="connect-cli-shell rounded-xl border p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <TerminalSquare className="h-4 w-4 text-slate-600" />
-                  <p className="text-sm font-semibold text-slate-800">{selectedCliTool.name}</p>
-                  <Badge variant="outline">{protocolLabel(selectedCliTool.protocol, isZh)}</Badge>
+                  <p className="text-sm font-semibold text-slate-900">{selectedCliTool.name}</p>
+                  <Badge variant="outline" className="connect-label-badge">{protocolLabel(selectedCliTool.protocol, isZh)}</Badge>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4 items-start">
@@ -781,36 +776,31 @@ export default function ConnectPage() {
                     <p className="ml-1 text-xs leading-none font-normal text-slate-900">
                       {isZh ? "选择路由" : "Select Route"}
                     </p>
-                    <Select
+                  <Combobox
+                    className="bg-white"
                       value={selectedCliRouteId}
                       onValueChange={(routeId) => {
                         setSelectedCliRouteId(routeId);
                         setCliRouteAnchorByTool((prev) => ({ ...prev, [selectedCliTool.id]: routeId }));
                       }}
-                    >
-                      <SelectTrigger>
-                        <SelectValue
-                          placeholder={
-                            cliRoutes.length > 0
-                              ? (isZh ? "选择路由" : "Select route")
-                              : (isZh ? "请先创建对应协议路由" : "Create matching protocol route first")
-                          }
-                        />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {cliRoutes.map((route) => (
-                          <SelectItem key={route.id} value={route.id}>
-                            {`${route.name} · ${protocolLabel(route.ingress_protocol, isZh)} · ${route.virtual_model}`}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    options={cliRoutes.map((route) => ({
+                      value: route.id,
+                      label: `${route.name} · ${route.virtual_model}`,
+                    }))}
+                    placeholder={
+                      cliRoutes.length > 0
+                        ? (isZh ? "选择路由" : "Select route")
+                        : (isZh ? "请先创建路由" : "Create route first")
+                    }
+                    searchPlaceholder={isZh ? "搜索路由..." : "Search routes..."}
+                    emptyText={isZh ? "暂无可选路由" : "No routes available"}
+                  />
                     {selectedCliCapabilities && (
                       <div className="flex flex-wrap gap-2 text-xs text-slate-600 pt-1">
-                        {selectedCliCapabilities.reasoning && <Badge variant="success">{isZh ? "推理" : "Reasoning"}</Badge>}
-                        {selectedCliCapabilities.tool_call && <Badge variant="success">{isZh ? "工具调用" : "Tools"}</Badge>}
-                        <Badge variant="outline">
-                          {isZh ? "上下文" : "Ctx"} {Math.round(selectedCliCapabilities.context_window / 1024)}K
+                        {selectedCliCapabilities.reasoning && <Badge variant="success" className="connect-label-badge">{isZh ? "推理" : "Reasoning"}</Badge>}
+                        {selectedCliCapabilities.tool_call && <Badge variant="success" className="connect-label-badge">{isZh ? "工具调用" : "Tools"}</Badge>}
+                        <Badge variant="success" className="connect-label-badge">
+                          {Math.round(selectedCliCapabilities.context_window / 1024)}K
                         </Badge>
                       </div>
                     )}
@@ -820,24 +810,18 @@ export default function ConnectPage() {
                       <p className="ml-1 text-xs leading-none font-normal text-slate-900">
                         {isZh ? "选择 API Key" : "Select API Key"}
                       </p>
-                      <Select
+                    <Combobox
+                      className="bg-white"
                         value={selectedCliKeyId}
                         onValueChange={setSelectedCliKeyId}
-                        disabled={!selectedCliRoute}
-                      >
-                        <SelectTrigger>
-                          <SelectValue
-                            placeholder={isZh ? "选择 API Key" : "Select API key"}
-                          />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {cliAvailableKeys.map((key) => (
-                            <SelectItem key={key.id} value={key.id}>
-                              {`${key.name} · ${maskApiKey(key.key)}`}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      options={cliAvailableKeys.map((key) => ({
+                        value: key.id,
+                        label: `${key.name} · ${maskApiKey(key.key)}`,
+                      }))}
+                      placeholder={isZh ? "选择 API Key" : "Select API key"}
+                      searchPlaceholder={isZh ? "搜索 API Key..." : "Search API keys..."}
+                      emptyText={isZh ? "暂无可选 API Key" : "No API keys available"}
+                    />
                     </div>
                   )}
                 </div>
@@ -942,8 +926,8 @@ export default function ConnectPage() {
                 {cliRoutes.length === 0 && (
                   <p className="text-xs text-amber-600">
                     {isZh
-                      ? "当前工具协议下没有可选路由，请先创建路由。"
-                      : "No routes for this tool protocol. Create a route first."}
+                      ? "当前没有可选路由，请先创建路由。"
+                      : "No routes available. Create a route first."}
                   </p>
                 )}
                 {selectedCliRoute?.access_control && !selectedCliApiKey && (
@@ -964,97 +948,145 @@ export default function ConnectPage() {
           </TabsContent>
 
           <TabsContent value="code" className="!mt-1 space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <p className="ml-1 text-xs leading-none font-normal text-slate-900">
-                  {isZh ? "选择路由" : "Select Route"}
-                </p>
-                <Select value={selectedCodeRouteId} onValueChange={setSelectedCodeRouteId}>
-                  <SelectTrigger>
-                    <SelectValue
-                      placeholder={isZh ? "请先创建路由" : "Create route first"}
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {routes.map((route) => (
-                      <SelectItem key={route.id} value={route.id}>
-                        {`${route.name} · ${protocolLabel(route.ingress_protocol, isZh)} · ${route.virtual_model}`}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+            <div className="space-y-2">
+              <p className="ml-1 text-xs leading-none font-normal text-slate-900">
+                {isZh ? "选择接入协议" : "Select Ingress Protocol"}
+              </p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {CODE_PROTOCOLS.map((protocol) => {
+                  const active = protocol.id === selectedCodeProtocol;
+                  return (
+                    <button
+                      key={protocol.id}
+                      type="button"
+                      onClick={() => setSelectedCodeProtocol(protocol.id)}
+                      data-state={active ? "on" : "off"}
+                      className="provider-preset-card h-auto rounded-xl px-3 py-2.5 text-left"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <div className="inline-flex h-9 w-9 items-center justify-center">
+                          <ProviderIcon
+                            iconKey={protocol.iconKey}
+                            name={protocol.name}
+                            protocol={protocol.id}
+                            size={30}
+                            className="provider-preset-icon provider-preset-icon-colored rounded-none border-0 bg-transparent"
+                          />
+                          <ProviderIcon
+                            iconKey={protocol.iconKey}
+                            name={protocol.name}
+                            protocol={protocol.id}
+                            size={30}
+                            monochrome
+                            className="provider-preset-icon provider-preset-icon-mono rounded-none border-0 bg-transparent"
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-base leading-tight font-semibold text-slate-900">{protocol.name}</p>
+                          <p className="mt-1 text-xs text-slate-500">{protocol.apiPath}</p>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
-
-              {selectedRoute?.access_control && (
-                <div className="space-y-2">
-                  <p className="ml-1 text-xs leading-none font-normal text-slate-900">
-                    {isZh ? "选择 API Key" : "Select API Key"}
-                  </p>
-                  <Select
-                    value={selectedCodeKeyId}
-                    onValueChange={setSelectedCodeKeyId}
-                    disabled={!selectedRoute}
-                  >
-                    <SelectTrigger>
-                      <SelectValue
-                        placeholder={isZh ? "选择 API Key" : "Select API key"}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {codeAvailableKeys.map((key) => (
-                        <SelectItem key={key.id} value={key.id}>
-                          {`${key.name} · ${maskApiKey(key.key)}`}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
             </div>
 
-            {selectedRoute && (
-              <div className="space-y-2">
-                <div className="connect-code-tabs flex gap-1">
-                  {CODE_LANGS.map((lang) => (
-                    <button
-                      key={lang}
-                      onClick={() => setCodeLang(lang)}
-                      className={`connect-code-tab-btn px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
-                        codeLang === lang ? "is-active" : ""
-                      }`}
-                    >
-                      {languageLabel(lang)}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="connect-code-example-box relative rounded-xl p-4">
-                  <button
-                    onClick={() => copyText(generatedCode, "code")}
-                    className="connect-code-copy-btn absolute top-3 right-3 rounded-xl p-3 cursor-pointer transition-colors"
-                    title={isZh ? "复制代码" : "Copy code"}
-                  >
-                    {copiedTarget === "code" ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
-                  </button>
-                  <Suspense fallback={<pre className="overflow-x-auto text-xs text-slate-500">{generatedCode}</pre>}>
-                    <CodeHighlighter
-                      code={generatedCode}
-                      language={syntaxLanguage(codeLang)}
-                      dark={isDarkTheme}
-                      padding={0}
-                    />
-                  </Suspense>
-                </div>
+            <div className="connect-cli-shell rounded-xl border p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <Code2 className="h-4 w-4 text-slate-600" />
+                <p className="text-sm font-semibold text-slate-900">{protocolLabel(selectedCodeProtocol, isZh)}</p>
+                <Badge variant="outline" className="connect-label-badge">{protocolApiPath(selectedCodeProtocol)}</Badge>
               </div>
-            )}
 
-            {selectedRoute && !selectedRoute.access_control && (
-              <p className="text-xs text-slate-500">
-                {isZh
-                  ? `当前路由未开启访问控制，示例中已使用占位 API Key：${OPTIONAL_KEY_PLACEHOLDER}`
-                  : `Access control is disabled on this route. The sample uses placeholder key: ${OPTIONAL_KEY_PLACEHOLDER}`}
-              </p>
-            )}
+              <div className="grid grid-cols-2 gap-4 items-start">
+                <div className="space-y-2">
+                  <p className="ml-1 text-xs leading-none font-normal text-slate-900">
+                    {isZh ? "选择路由" : "Select Route"}
+                  </p>
+                  <Combobox
+                    className="bg-white"
+                    value={selectedCodeRouteId}
+                    onValueChange={setSelectedCodeRouteId}
+                    options={routes.map((route) => ({
+                      value: route.id,
+                      label: `${route.name} · ${route.virtual_model}`,
+                    }))}
+                    placeholder={routes.length > 0 ? (isZh ? "选择路由" : "Select route") : (isZh ? "请先创建路由" : "Create route first")}
+                    searchPlaceholder={isZh ? "搜索路由..." : "Search routes..."}
+                    emptyText={isZh ? "暂无可选路由" : "No routes available"}
+                  />
+                </div>
+
+                {selectedRoute?.access_control && (
+                  <div className="space-y-2">
+                    <p className="ml-1 text-xs leading-none font-normal text-slate-900">
+                      {isZh ? "选择 API Key" : "Select API Key"}
+                    </p>
+                    <Combobox
+                      className="bg-white"
+                      value={selectedCodeKeyId}
+                      onValueChange={setSelectedCodeKeyId}
+                      options={codeAvailableKeys.map((key) => ({
+                        value: key.id,
+                        label: `${key.name} · ${maskApiKey(key.key)}`,
+                      }))}
+                      placeholder={isZh ? "选择 API Key" : "Select API key"}
+                      searchPlaceholder={isZh ? "搜索 API Key..." : "Search API keys..."}
+                      emptyText={isZh ? "暂无可选 API Key" : "No API keys available"}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {selectedRoute ? (
+                <div className="space-y-2">
+                  <div className="connect-code-tabs flex gap-1">
+                    {CODE_LANGS.map((lang) => (
+                      <button
+                        key={lang}
+                        onClick={() => setCodeLang(lang)}
+                        className={`connect-code-tab-btn px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                          codeLang === lang ? "is-active" : ""
+                        }`}
+                      >
+                        {languageLabel(lang)}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="connect-code-example-box relative rounded-xl p-4">
+                    <button
+                      onClick={() => copyText(generatedCode, "code")}
+                      className="connect-code-copy-btn absolute top-3 right-3 rounded-xl p-3 cursor-pointer transition-colors"
+                      title={isZh ? "复制代码" : "Copy code"}
+                    >
+                      {copiedTarget === "code" ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                    </button>
+                    <Suspense fallback={<pre className="overflow-x-auto text-xs text-slate-500">{generatedCode}</pre>}>
+                      <CodeHighlighter
+                        code={generatedCode}
+                        language={syntaxLanguage(codeLang)}
+                        dark={isDarkTheme}
+                        padding={0}
+                      />
+                    </Suspense>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-amber-600">
+                  {isZh ? "请先选择路由以生成代码示例。" : "Select a route first to generate code samples."}
+                </p>
+              )}
+
+              {selectedRoute && !selectedRoute.access_control && (
+                <p className="text-xs text-slate-500">
+                  {isZh
+                    ? `当前路由未开启访问控制，示例中已使用占位 API Key：${OPTIONAL_KEY_PLACEHOLDER}`
+                    : `Access control is disabled on this route. The sample uses placeholder key: ${OPTIONAL_KEY_PLACEHOLDER}`}
+                </p>
+              )}
+            </div>
           </TabsContent>
 
         </Tabs>

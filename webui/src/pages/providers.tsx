@@ -565,29 +565,22 @@ export default function ProvidersPage() {
     };
 
     try {
-      if (!provider.base_url) {
-        finish(
-          { success: false, latency_ms: 0, model: undefined, error: "Base URL is empty" },
-          isZh ? "✗ Base URL 为空，无法开始测试" : "✗ Base URL is empty, unable to start test",
-          "error",
-        );
-        return;
-      }
-
-      try {
-        new URL(provider.base_url);
-      } catch {
-        finish(
-          { success: false, latency_ms: 0, model: undefined, error: "Invalid Base URL format" },
-          isZh ? "✗ Base URL 格式不合法" : "✗ Base URL format is invalid",
-          "error",
-        );
-        return;
+      const endpointMap = parseProtocolEndpoints(provider.protocol_endpoints);
+      const endpointTargets = protocolOptions
+        .map((option) => ({ protocol: option.value, baseUrl: endpointMap[option.value]?.trim() ?? "" }))
+        .filter((item) => Boolean(item.baseUrl));
+      if (endpointTargets.length === 0 && provider.base_url?.trim()) {
+        endpointTargets.push({
+          protocol: (provider.default_protocol || provider.protocol || "openai") as ProviderProtocol,
+          baseUrl: provider.base_url.trim(),
+        });
       }
 
       appendTestLog("info", isZh ? `开始测试 ${provider.name}...` : `Start testing ${provider.name}...`);
       appendTestLog("info", isZh ? "▶ 连通性检测" : "▶ Connectivity check");
-      appendTestLog("info", `→ ${provider.base_url}`);
+      endpointTargets.forEach((target) => {
+        appendTestLog("info", `→ [${target.protocol}] ${target.baseUrl}`);
+      });
 
       const connectivity = await backend<TestResult>("test_provider", { id: provider.id });
       if (isCanceled()) return;
@@ -1602,7 +1595,7 @@ export default function ProvidersPage() {
                                   ? "secondary"
                                   : "success"
                             }
-                            className={protocol === "gemini" ? "bg-violet-50 text-violet-700 uppercase" : "uppercase"}
+                            className={`connect-label-badge ${protocol === "gemini" ? "bg-violet-50 text-violet-700" : ""} uppercase`}
                           >
                             {protocol}
                           </Badge>

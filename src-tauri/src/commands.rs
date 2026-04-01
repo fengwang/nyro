@@ -530,7 +530,7 @@ pub async fn sync_cli_config(
     host: String,
     api_key: String,
     model: String,
-    capabilities: Option<CliModelCapabilities>,
+    _capabilities: Option<CliModelCapabilities>,
 ) -> Result<Vec<String>, String> {
     let home_dir = resolve_home_dir().ok_or_else(|| "failed to resolve home directory".to_string())?;
     let normalized_host = host.trim().trim_end_matches('/').to_string();
@@ -594,10 +594,6 @@ pub async fn sync_cli_config(
                 serde_json::Value::String(normalized_model.clone()),
             );
             env_obj.insert(
-                "ANTHROPIC_REASONING_MODEL".to_string(),
-                serde_json::Value::String(normalized_model.clone()),
-            );
-            env_obj.insert(
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
                 serde_json::Value::String(normalized_model.clone()),
             );
@@ -652,57 +648,32 @@ pub async fn sync_cli_config(
                 &auth_json,
             )?;
 
-            let caps = capabilities.unwrap_or_default();
-            let mut config_lines = vec![
+            let config_lines = vec![
                 r#"model_provider = "nyro""#.to_string(),
-                format!(r#"model = "{}""#, normalized_model),
-                r#"model_context_window = 128000"#.to_string(),
+                format!(r#"model = "{normalized_model}""#),
+                r#"model_reasoning_effort = "high""#.to_string(),
+                r#"disable_response_storage = true"#.to_string(),
+                String::new(),
+                r#"[model_providers]"#.to_string(),
+                r#"[model_providers.nyro]"#.to_string(),
+                r#"name = "Nyro Gateway""#.to_string(),
+                format!(r#"base_url = "{}/v1""#, normalized_host),
+                r#"wire_api = "responses""#.to_string(),
+                r#"requires_openai_auth = true"#.to_string(),
             ];
-            if caps.reasoning.unwrap_or(false) {
-                config_lines.push(r#"model_reasoning_effort = "high""#.to_string());
-            }
-            config_lines.push(r#"disable_response_storage = true"#.to_string());
-            config_lines.push(format!(
-                r#"model_catalog_json = "{}""#,
-                models_path.to_string_lossy()
-            ));
-            config_lines.push(String::new());
-            config_lines.push(r#"[model_providers.nyro]"#.to_string());
-            config_lines.push(r#"name = "Nyro Gateway""#.to_string());
-            config_lines.push(format!(r#"base_url = "{}/v1""#, normalized_host));
-            config_lines.push(r#"wire_api = "responses""#.to_string());
-            config_lines.push(r#"requires_openai_auth = true"#.to_string());
-            config_lines.push(String::new());
             let config_toml = config_lines.join("\n");
             write_text_file(&config_path, &config_toml)?;
 
-            let models_json = serde_json::json!({
-                "models": [
-                    {
-                        "slug": normalized_model,
-                        "display_name": model.trim(),
-                        "supported_reasoning_levels": [],
-                        "shell_type": "shell_command",
-                        "visibility": "list",
-                        "supported_in_api": true,
-                        "priority": 1,
-                        "base_instructions": "",
-                        "supports_reasoning_summaries": false,
-                        "support_verbosity": false,
-                        "apply_patch_tool_type": "freeform",
-                        "truncation_policy": { "mode": "tokens", "limit": 10000 },
-                        "supports_parallel_tool_calls": false,
-                        "experimental_supported_tools": [],
-                        "context_window": caps.context_window.filter(|v| *v > 0).unwrap_or(128_000),
-                    }
-                ]
-            });
-            write_json_file(&models_path, &models_json)?;
-            Ok(vec![
+            let mut changed_paths = vec![
                 auth_path.to_string_lossy().to_string(),
                 config_path.to_string_lossy().to_string(),
-                models_path.to_string_lossy().to_string(),
-            ])
+            ];
+            if models_path.exists() {
+                fs::remove_file(&models_path)
+                    .map_err(|e| format!("failed removing codex model catalog {}: {e}", models_path.display()))?;
+                changed_paths.push(models_path.to_string_lossy().to_string());
+            }
+            Ok(changed_paths)
         }
         "gemini-cli" => {
             let env_path = get_gemini_env_path(&home_dir);

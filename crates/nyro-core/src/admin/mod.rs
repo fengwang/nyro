@@ -155,44 +155,64 @@ impl AdminService {
             .clear_ollama_capability_cache_for_provider(&provider.id)
             .await;
         let start = Instant::now();
-        let base_url = provider.base_url.trim();
-        let result = if base_url.is_empty() {
+        let mut endpoints = provider
+            .parsed_protocol_endpoints()
+            .into_iter()
+            .collect::<Vec<_>>();
+        endpoints.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let result = if endpoints.is_empty() {
             TestResult {
                 success: false,
                 latency_ms: 0,
                 model: None,
                 error: Some("Base URL is empty".to_string()),
             }
-        } else if reqwest::Url::parse(base_url).is_err() {
-            TestResult {
-                success: false,
-                latency_ms: 0,
-                model: None,
-                error: Some("Base URL format is invalid".to_string()),
-            }
         } else {
-            match self
-                .gw
-                .http_client
-                .get(base_url)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-            {
-            // Any HTTP response means the endpoint is reachable, including 4xx.
-            Ok(_) => TestResult {
-                success: true,
-                latency_ms: start.elapsed().as_millis() as u64,
-                model: None,
-                error: None,
-            },
-            Err(e) => TestResult {
-                success: false,
-                latency_ms: start.elapsed().as_millis() as u64,
-                model: None,
-                error: Some(format_connectivity_error(&e)),
-            },
-        }
+            let mut failures: Vec<String> = Vec::new();
+            for (protocol, endpoint) in endpoints {
+                let base_url = endpoint.base_url.trim();
+                if base_url.is_empty() {
+                    failures.push(format!("{protocol}: Base URL is empty"));
+                    continue;
+                }
+                if reqwest::Url::parse(base_url).is_err() {
+                    failures.push(format!("{protocol}: Base URL format is invalid"));
+                    continue;
+                }
+
+                match self
+                    .gw
+                    .http_client
+                    .get(base_url)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await
+                {
+                    // Any HTTP response means the endpoint is reachable, including 4xx.
+                    Ok(_) => {}
+                    Err(e) => failures.push(format!("{protocol}: {}", format_connectivity_error(&e))),
+                }
+            }
+
+            if failures.is_empty() {
+                TestResult {
+                    success: true,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    model: None,
+                    error: None,
+                }
+            } else {
+                TestResult {
+                    success: false,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    model: None,
+                    error: Some(format!(
+                        "Connectivity check failed for protocol endpoints: {}",
+                        failures.join("; ")
+                    )),
+                }
+            }
         };
         self.record_provider_test_result(&provider.id, &result).await?;
         Ok(result)

@@ -78,10 +78,10 @@ function ModelCapabilitySummary({ caps, isZh }: { caps: ModelCapabilities; isZh:
   return (
     <div className="mt-2 flex items-center gap-1.5 border-t border-slate-200 pt-2">
       <div className="flex flex-wrap items-center gap-1.5">
-        {caps.tool_call && <Badge variant="success">{isZh ? "工具调用" : "Tools"}</Badge>}
-        {caps.reasoning && <Badge variant="success">{isZh ? "推理" : "Reasoning"}</Badge>}
-        {caps.input_modalities.includes("image") && <Badge variant="success">{isZh ? "视觉" : "Vision"}</Badge>}
-        <Badge variant="success">{Math.round(caps.context_window / 1024)}K</Badge>
+        {caps.tool_call && <Badge variant="success" className="connect-label-badge">{isZh ? "工具调用" : "Tools"}</Badge>}
+        {caps.reasoning && <Badge variant="success" className="connect-label-badge">{isZh ? "推理" : "Reasoning"}</Badge>}
+        {caps.input_modalities.includes("image") && <Badge variant="success" className="connect-label-badge">{isZh ? "视觉" : "Vision"}</Badge>}
+        <Badge variant="success" className="connect-label-badge">{Math.round(caps.context_window / 1024)}K</Badge>
       </div>
     </div>
   );
@@ -678,23 +678,23 @@ export default function RoutesPage() {
                       {route.virtual_model}
                     </code>
                     {route.targets && route.targets.length > 1 && (
-                      <Badge variant="success">
+                      <Badge variant="success" className="connect-label-badge">
                         {isZh ? `共 ${route.targets.length} 个目标` : `${route.targets.length} Targets`}
                       </Badge>
                     )}
                     <Badge
                       variant="secondary"
-                      className="bg-sky-50 text-sky-700"
+                      className="connect-label-badge bg-sky-50 text-sky-700"
                     >
                       {strategyLabel(route.strategy ?? "weighted", isZh)}
                     </Badge>
                     {route.access_control && (
-                      <Badge variant="success">
+                      <Badge variant="success" className="connect-label-badge">
                         {isZh ? "鉴权" : "Auth"}
                       </Badge>
                     )}
                     {!route.is_active && (
-                      <Badge variant="danger">
+                      <Badge variant="danger" className="connect-label-badge">
                         {isZh ? "停用" : "Inactive"}
                       </Badge>
                     )}
@@ -793,7 +793,6 @@ function buildCreatePayload(form: RouteForm): CreateRoute {
   const primary = targets[0] ?? { provider_id: "", model: "" };
   return {
     name: form.name.trim(),
-    ingress_protocol: "openai",
     virtual_model: form.virtual_model.trim(),
     strategy: form.strategy,
     targets,

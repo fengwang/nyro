@@ -584,24 +584,24 @@ export default function ApiKeysPage() {
                       <code className="inline-flex h-5 items-center rounded bg-slate-100 px-2 py-0.5 text-[10px] leading-none font-medium text-slate-600">
                         {shortApiKeyTag(item.key)}
                       </code>
-                      <Badge variant={item.status === "active" ? "success" : "danger"}>
+                      <Badge variant={item.status === "active" ? "success" : "danger"} className="connect-label-badge">
                         {item.status}
                       </Badge>
                       {item.route_ids.length > 0 && (
-                        <Badge variant="warning" className="bg-cyan-50 text-cyan-700">
+                        <Badge variant="warning" className="connect-label-badge bg-cyan-50 text-cyan-700">
                           {isZh ? `共 ${item.route_ids.length} 条路由` : `${item.route_ids.length} Routes`}
                         </Badge>
                       )}
-                      <Badge variant="warning" className="bg-indigo-50 text-indigo-700">
+                      <Badge variant="warning" className="connect-label-badge bg-indigo-50 text-indigo-700">
                         RPM {quotaText(item.rpm)}
                       </Badge>
-                      <Badge variant="warning" className="bg-rose-50 text-rose-700">
+                      <Badge variant="warning" className="connect-label-badge bg-rose-50 text-rose-700">
                         RPD {quotaText(item.rpd)}
                       </Badge>
-                      <Badge variant="warning" className="bg-teal-50 text-teal-700">
+                      <Badge variant="warning" className="connect-label-badge bg-teal-50 text-teal-700">
                         TPM {quotaText(item.tpm)}
                       </Badge>
-                      <Badge variant="warning" className="bg-amber-50 text-amber-700">
+                      <Badge variant="warning" className="connect-label-badge bg-amber-50 text-amber-700">
                         TPD {quotaText(item.tpd)}
                       </Badge>
                     </div>
